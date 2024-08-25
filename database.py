@@ -8,3 +8,5 @@ URL_DATABASE = "postgresql://postgres:pass@localhost:5432/uniVerse"
 engine = create_engine(URL_DATABASE)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
