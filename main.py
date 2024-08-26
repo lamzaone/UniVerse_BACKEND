@@ -1,13 +1,29 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Body
 from pydantic import BaseModel
-from typing import List, Annotated
-import models
-from database import engine, SessionLocal
+from typing import Annotated
 from sqlalchemy.orm import Session
+import requests
+from datetime import datetime, timedelta
+from database import engine, SessionLocal
+import secrets
+import json
+import models
+from fastapi.middleware.cors import CORSMiddleware
+from google.oauth2 import id_token
+from google.auth.transport import requests
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+CLIENT_ID = "167769953872-b5rnqtgjtuhvl09g45oid5r9r0lui2d6.apps.googleusercontent.com"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200"],  # Adjust this to match your frontend's URL
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 
 def get_db():
     db = SessionLocal()
@@ -16,7 +32,16 @@ def get_db():
     finally:
         db.close()
 
+def generate_token():
+    return secrets.token_urlsafe(32)
+
+def generate_refresh_token():
+    return secrets.token_urlsafe(64)
+
 db_dependency = Annotated[Session, Depends(get_db)]
+
+class TokenRequest(BaseModel):
+    token: str
 
 class User(BaseModel):
     id: int
@@ -25,40 +50,49 @@ class User(BaseModel):
     nickname: str
     picture: str
 
-class Group(BaseModel):
-    id: int
-    name: str
-    description: str
-    owner_id: int
-    picture: str
-    created_at: str
+class UserIn(BaseModel):
+    token: str
 
-class Server(BaseModel):
-    id: int
-    name: str
-    description: str
-    owner_id: int
-    picture: str
-    created_at: str
+@app.post("/auth/google", response_model=User)
+def google_auth(token_request: UserIn, db: db_dependency):
+    idinfo = id_token.verify_oauth2_token(token_request.token, requests.Request(), CLIENT_ID)
+    
+    # If idinfo is a string, parse it
+    if isinstance(idinfo, str):
+        google_data = json.loads(idinfo)
+    else:
+        google_data = idinfo
 
-class Channel(BaseModel):
-    id: int
-    name: str
-    description: str
-    server_id: int
-    created_at: str
+    print(google_data)
+    # Now google_data should be a dictionary, and you can access its fields
+    email = google_data['email']
+    name = "john doe" # google_data['name']
+    picture = "https://example.com/picture.jpg" # google_data['picture']
 
-@app.post("/user", response_model=User)
-def create_user(user: User, db: Session = Depends(get_db)):
-    db_user = models.User(id=user.id, email=user.email, name=user.name, nickname=user.nickname, picture=user.picture)
-    db.add(db_user)
+    # Check if user already exists in the database
+    db_user = db.query(models.User).filter(models.User.email == email).first()
+    
+    if not db_user:
+        # If the user doesn't exist, create a new one
+        refresh_token = generate_refresh_token()
+        db_user = models.User(
+            email=email,
+            name=name,
+            nickname=name,
+            picture=picture,
+            token=token_request.token,
+            refresh_token=refresh_token,
+            token_expiry=datetime.now() + timedelta(days=1),
+            refresh_token_expiry=datetime.now() + timedelta(days=7)
+        )
+        db.add(db_user)
+    else:
+        # Update existing user tokens and expiry dates
+        db_user.token = token_request.token
+        db_user.refresh_token = generate_refresh_token()
+        db_user.token_expiry = datetime.now() + timedelta(days=1)
+        db_user.refresh_token_expiry = datetime.now() + timedelta(days=7)
+
     db.commit()
     db.refresh(db_user)
-    return db_user
-
-@app.get("/user/{user_id}", response_model=User)
-def read_user(user_id: int, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
     return db_user

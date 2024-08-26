@@ -1,14 +1,28 @@
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime
 from database import Base
 
+from datetime import datetime, timedelta
 class User(Base):
     __tablename__ = "users"
-
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
     name = Column(String)
     nickname = Column(String)
     picture = Column(String)
+    token = Column(String)
+    refresh_token = Column(String)
+    token_expiry = Column(DateTime)
+    refresh_token_expiry = Column(DateTime)
+
+    def refresh_token(self):
+        self.token_expiry = datetime.now() + timedelta(days=1)
+        self.refresh_token_expiry = datetime.now() + timedelta(days=7)
+
+    def set_tokens(self, token, refresh_token):
+        self.token = token
+        self.token_expiry = datetime.now() + timedelta(days=1)
+        self.refresh_token = refresh_token
+        self.refresh_token_expiry = datetime.now() + timedelta(days=7)
 
 class Group(Base):
     __tablename__ = "groups"
