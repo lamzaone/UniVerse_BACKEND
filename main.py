@@ -36,7 +36,7 @@ def generate_token():
     return secrets.token_urlsafe(32)
 
 def generate_refresh_token():
-    return secrets.token_urlsafe(64)
+    return secrets.token_urlsafe(32)
 
 db_dependency = Annotated[Session, Depends(get_db)]
 
