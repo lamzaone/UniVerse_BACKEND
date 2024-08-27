@@ -14,7 +14,7 @@ class User(Base):
     token_expiry = Column(DateTime)
     refresh_token_expiry = Column(DateTime)
 
-    def refresh_token(self):
+    def refresh_tokens(self):
         self.token_expiry = datetime.now() + timedelta(days=1)
         self.refresh_token_expiry = datetime.now() + timedelta(days=7)
 
