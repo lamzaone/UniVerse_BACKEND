@@ -1,6 +1,7 @@
 from sqlalchemy import Boolean, Column,DateTime, ForeignKey, Integer, String, LargeBinary
 from sqlalchemy.orm import relationship
 from database import Base
+import secrets
 
 # User Model
 class User(Base):
@@ -38,13 +39,20 @@ class FacultyEnrollment(Base):
     group = Column(Integer)
     
 
+
+
 # Server Model
 class Server(Base):
     __tablename__ = "server"
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
+    description = Column(String)
     owner_id = Column(Integer, ForeignKey("user.id"))
+    invite_code = Column(String)
+    created_at = Column(DateTime)
+
+
     
 
 # Server Member Model

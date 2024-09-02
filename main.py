@@ -15,6 +15,7 @@ import requests
 import logging
 import os
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -69,8 +70,13 @@ class Server(BaseModel):
     name: str
     description: str
     owner_id: int
-    picture: str
+    invite_code: str
     created_at: datetime
+
+class ServerCreate(BaseModel):
+    name: str
+    description: str
+    owner_id: int
 
 IMAGE_DIR = "user_images"  # Directory to store user images
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -229,3 +235,98 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
     )
     
     return user_response
+
+
+@app.post("/server/create", response_model=Server)
+def create_server(server: ServerCreate, db: db_dependency):
+    db_server = models.Server(
+        name=server.name,
+        description=server.description,
+        owner_id=server.owner_id
+    )
+    db_server.invite_code=secrets.token_urlsafe(6),
+    db_server.created_at=datetime.now()
+
+    
+    db.add(db_server)
+    db.commit()
+    db.refresh(db_server)
+    
+    return db_server
+
+@app.get("/server/user/{user_id}", response_model=list[Server])
+def get_servers(user_id: int, db: db_dependency):
+    owned_servers = db.query(models.Server).filter(models.Server.owner_id == user_id).all()
+    db_servers = db.query(models.Server).join(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()
+    db_servers.extend(owned_servers)
+    return db_servers
+
+class GetServer(BaseModel):
+    server_id: int
+    user_id: int
+
+
+@app.post("/server", response_model=Server)
+def get_server(server_info: GetServer, db: db_dependency):
+    try:
+        db_server = db.query(models.Server).filter(models.Server.id == server_info.server_id).first()
+        if not db_server:
+            raise HTTPException(status_code=404, detail="Server not found")
+        
+        is_member = db.query(models.ServerMember).filter(
+            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.server_id == server_info.server_id
+        ).first()
+
+        is_owner = db.query(models.Server).filter(
+            models.Server.id == server_info.server_id,
+            models.Server.owner_id == server_info.user_id
+        ).first()
+        
+        # If the user is not a member, raise an exception
+        if not is_member and not is_owner:
+            raise HTTPException(status_code=403, detail="User is not a member of the server")
+        
+        # Return the server details if checks pass
+        return db_server
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class JoinServer(BaseModel):
+    invite_code: str
+    user_id: int
+
+@app.post("/server/join", response_model=Server)
+def join_server(server_info: JoinServer, db: db_dependency):
+    try:
+        # Fetch the server using the invite code
+        db_server = db.query(models.Server).filter(models.Server.invite_code == server_info.invite_code).first()
+        
+        if not db_server:
+            raise HTTPException(status_code=404, detail="Server not found")
+        
+        # Check if the user is already a member of the server
+        is_member = db.query(models.ServerMember).filter(
+            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.server_id == db_server.id  # Correct filtering by server_id
+        ).first()
+        
+        if is_member:
+            raise HTTPException(status_code=400, detail="User is already a member of the server")
+        
+        # Add the user as a new member to the server
+        db_member = models.ServerMember(
+            user_id=server_info.user_id,
+            server_id=db_server.id  # Use the server's ID from the fetched server
+        )
+        db.add(db_member)
+        db.commit()
+
+        # Return the server information
+        return db_server
+    
+    except Exception as e:
+        # Handle SQL-related errors
+        raise HTTPException(status_code=500, detail="Internal Server Error") from e
