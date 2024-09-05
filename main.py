@@ -401,16 +401,39 @@ def create_room(server_id: int, room_name: str, room_type: str, category_id: int
 # Update Room Order
 @app.put("/server/room/{room_id}/reorder")
 def reorder_room(room_id: int, new_position: int, db: db_dependency):
+    # Fetch the room to be reordered
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
     
     if not db_room:
         raise HTTPException(status_code=404, detail="Room not found")
     
-    db_room.position = new_position
+    # Fetch all rooms in the same category
+    rooms_in_category = (
+        db.query(models.ServerRoom)
+        .filter(
+            models.ServerRoom.server_id == db_room.server_id,
+            models.ServerRoom.category_id == db_room.category_id
+        )
+        .order_by(models.ServerRoom.position)
+        .all()
+    )
+
+    # Remove the room being reordered from the list
+    rooms_in_category.remove(db_room)
+
+    # Insert the room at the new position
+    rooms_in_category.insert(new_position, db_room)
+
+    # Reassign positions for all rooms in this category
+    for index, room in enumerate(rooms_in_category):
+        room.position = index
+
     db.commit()
     db.refresh(db_room)
-    
+
     return db_room
+
+
 
 # Move Room to Another Category
 @app.put("/server/room/{room_id}/move")
@@ -420,12 +443,43 @@ def move_room(room_id: int, new_category_id: int, new_position: int, db: db_depe
     if not db_room:
         raise HTTPException(status_code=404, detail="Room not found")
     
-    db_room.category_id = new_category_id
-    db_room.position = new_position
-    db.commit()
-    db.refresh(db_room)
+    # Reorder rooms in the current category after removing the room
+    current_category_rooms = (
+        db.query(models.ServerRoom)
+        .filter(
+            models.ServerRoom.server_id == db_room.server_id,
+            models.ServerRoom.category_id == db_room.category_id
+        )
+        .order_by(models.ServerRoom.position)
+        .all()
+    )
+    # Remove the room from its current category
+    current_category_rooms.remove(db_room)
+
+    # Update positions of remaining rooms in the current category
+    for index, room in enumerate(current_category_rooms):
+        room.position = index
+
+    # Fetch all rooms in the new category to adjust the order
+    new_category_rooms = (
+        db.query(models.ServerRoom)
+        .filter(
+            models.ServerRoom.server_id == db_room.server_id,
+            models.ServerRoom.category_id == new_category_id
+        )
+        .order_by(models.ServerRoom.position)
+        .all()
+    )
+
+    # Insert the room at the specified position in the new category
+    new_category_rooms.insert(new_position, db_room)
+
+    # Reassign positions for all rooms in the new category
+    for index, room in enumerate(new_category_rooms):
+        room.position = index
     
-    return db_room
+    # Update the room to the new
+
 
 
 class RoomResponse(BaseModel):
