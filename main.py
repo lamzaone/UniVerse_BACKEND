@@ -1,7 +1,7 @@
 import base64
 from fastapi import FastAPI, HTTPException, Depends, Body
 from pydantic import BaseModel
-from typing import Annotated
+from typing import Annotated, List
 from sqlalchemy.orm import Session
 import requests
 from datetime import datetime, timedelta
@@ -73,10 +73,32 @@ class Server(BaseModel):
     invite_code: str
     created_at: datetime
 
+
+class ServerRoom(BaseModel):
+    id: int
+    type: str
+    server_id: int
+    name: str
+    category_id: int
+    position: int
+
+class ServerMember(BaseModel):
+    user_id: int
+    server_id: int
+    access_level: int
+
+class RoomCategory(BaseModel):
+    id: int
+    name: str
+    server_id: int
+    position: int
+
+
 class ServerCreate(BaseModel):
     name: str
     description: str
     owner_id: int
+
 
 IMAGE_DIR = "user_images"  # Directory to store user images
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -94,6 +116,8 @@ def generate_token():
 def generate_refresh_token():
     return secrets.token_urlsafe(64)
 
+
+# Save profile picture to the filesystem
 def save_image_to_filesystem(image_url: str, filename: str) -> str:
     """Download image from URL and save it to the filesystem."""
     response = requests.get(image_url)
@@ -106,6 +130,7 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         logging.error(f"Failed to fetch image from URL: {image_url}")
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
+# Get user profile picture from the filesystem
 @app.get("/images/{image_name}")
 async def serve_image(image_name: str):
     """Endpoint to serve user images."""
@@ -114,6 +139,8 @@ async def serve_image(image_name: str):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(file_path)
 
+
+# Google authentication
 @app.post("/auth/google", response_model=User)
 def google_auth(token_request: UserIn, db: db_dependency):
     # Verify the ID token
@@ -186,6 +213,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
     
     return db_user_data
 
+# Refresh token
 @app.post("/auth/refresh", response_model=User)
 def refresh_tokens(token_request: TokenRequest, db: db_dependency):
     db_user = db.query(models.User).filter(models.User.refresh_token == token_request.token).first()
@@ -213,7 +241,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
     
     return user_response
 
-
+# Validate token
 @app.post("/auth/validate", response_model=User)
 def validate_token(token_request: TokenRequest, db: db_dependency):
     db_user = db.query(models.User).filter(models.User.token == token_request.token).first()
@@ -236,7 +264,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
     
     return user_response
 
-
+# Create a new server
 @app.post("/server/create", response_model=Server)
 def create_server(server: ServerCreate, db: db_dependency):
     db_server = models.Server(
@@ -254,6 +282,7 @@ def create_server(server: ServerCreate, db: db_dependency):
     
     return db_server
 
+# Get all servers of user
 @app.get("/server/user/{user_id}", response_model=list[Server])
 def get_servers(user_id: int, db: db_dependency):
     owned_servers = db.query(models.Server).filter(models.Server.owner_id == user_id).all()
@@ -261,11 +290,11 @@ def get_servers(user_id: int, db: db_dependency):
     db_servers.extend(owned_servers)
     return db_servers
 
+
+# Get a server by ID
 class GetServer(BaseModel):
     server_id: int
     user_id: int
-
-
 @app.post("/server", response_model=Server)
 def get_server(server_info: GetServer, db: db_dependency):
     try:
@@ -294,10 +323,10 @@ def get_server(server_info: GetServer, db: db_dependency):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# Join a server
 class JoinServer(BaseModel):
     invite_code: str
     user_id: int
-
 @app.post("/server/join", response_model=Server)
 def join_server(server_info: JoinServer, db: db_dependency):
     try:
@@ -330,3 +359,136 @@ def join_server(server_info: JoinServer, db: db_dependency):
     except Exception as e:
         # Handle SQL-related errors
         raise HTTPException(status_code=500, detail="Internal Server Error") from e
+
+
+# Create Room Category
+@app.post("/server/{server_id}/category/create", response_model=RoomCategory)
+def create_category(server_id: int, category_name: str, db: db_dependency):
+    category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
+    
+    db_category = models.RoomCategory(
+        name=category_name,
+        server_id=server_id,
+        position=category_position
+    )
+    
+    db.add(db_category)
+    db.commit()
+    db.refresh(db_category)
+    
+    return db_category
+
+# Create a new room
+@app.post("/server/{server_id}/room/create", response_model=ServerRoom)
+def create_room(server_id: int, room_name: str, room_type: str, category_id: int, db: db_dependency):
+    # Calculate the next position for the new room
+    room_position = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id, models.ServerRoom.category_id == category_id).count()
+    
+    db_room = models.ServerRoom(
+        name=room_name,
+        type=room_type,
+        server_id=server_id,
+        category_id=category_id,
+        position=room_position
+    )
+    
+    db.add(db_room)
+    db.commit()
+    db.refresh(db_room)
+    
+    return db_room
+
+# Update Room Order
+@app.put("/server/room/{room_id}/reorder")
+def reorder_room(room_id: int, new_position: int, db: db_dependency):
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    
+    if not db_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    db_room.position = new_position
+    db.commit()
+    db.refresh(db_room)
+    
+    return db_room
+
+# Move Room to Another Category
+@app.put("/server/room/{room_id}/move")
+def move_room(room_id: int, new_category_id: int, new_position: int, db: db_dependency):
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    
+    if not db_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    db_room.category_id = new_category_id
+    db_room.position = new_position
+    db.commit()
+    db.refresh(db_room)
+    
+    return db_room
+
+
+class RoomResponse(BaseModel):
+    id: int
+    name: str
+    type: str
+    category_id: int
+    position: int
+
+    class Config:
+        orm_mode = True
+        from_attributes=True
+
+class CategoryResponse(BaseModel):
+    id: int
+    name: str
+    position: int
+    rooms: List[RoomResponse] = []
+
+    class Config:
+        orm_mode = True
+        from_attributes=True
+
+# Endpoint to get categories and rooms for a server
+@app.get("/server/{server_id}/categories", response_model=List[CategoryResponse])
+def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
+    # Retrieve all categories for the given server
+    categories = (
+        db.query(models.RoomCategory)
+        .filter(models.RoomCategory.server_id == server_id)
+        .order_by(models.RoomCategory.position)
+        .all()
+    )
+    
+    # Retrieve all rooms and group them by their category
+    rooms = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id).all()
+    room_map = {}
+    for room in rooms:
+        if room.category_id not in room_map:
+            room_map[room.category_id] = []
+        room_map[room.category_id].append(room)
+
+    # Convert RoomCategory and ServerRoom instances to dictionaries or Pydantic models
+    result = []
+    for category in categories:
+        category_dict = {
+            'id': category.id,
+            'name': category.name,
+            'position': category.position,
+            'rooms': []
+        }
+        category_rooms = [RoomResponse.from_orm(room) for room in room_map.get(category.id, [])]
+        category_dict['rooms'] = category_rooms
+        result.append(CategoryResponse(**category_dict))
+
+    # Also add uncategorized rooms (rooms with category_id = None)
+    uncategorized_rooms = [RoomResponse.from_orm(room) for room in room_map.get(None, [])]
+    if uncategorized_rooms:
+        result.append(CategoryResponse(
+            id=None, 
+            name="Uncategorized", 
+            position=len(result), 
+            rooms=uncategorized_rooms
+        ))
+
+    return result
