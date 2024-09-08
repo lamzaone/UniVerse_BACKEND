@@ -57,25 +57,23 @@ class WebSocketManager:
                 await connection.send_text(message)
 
     # Handle connections for text rooms
-    async def connect_textroom(self, websocket: WebSocket, server_id: int, room_id: int):
+    async def connect_textroom(self, websocket: WebSocket, room_id: int):
         await websocket.accept()
-        if server_id not in self.textroom_connections:
-            self.textroom_connections[server_id] = {}
-        if room_id not in self.textroom_connections[server_id]:
-            self.textroom_connections[server_id][room_id] = []
-        self.textroom_connections[server_id][room_id].append(websocket)
+        if room_id not in self.textroom_connections:
+            self.textroom_connections[room_id] = []
+        self.textroom_connections[room_id].append(websocket)
 
-    def disconnect_textroom(self, websocket: WebSocket, server_id: int, room_id: int):
-        if server_id in self.textroom_connections and room_id in self.textroom_connections[server_id]:
-            self.textroom_connections[server_id][room_id].remove(websocket)
-            if not self.textroom_connections[server_id][room_id]:
-                del self.textroom_connections[server_id][room_id]
-                if not self.textroom_connections[server_id]:
-                    del self.textroom_connections[server_id]
+    def disconnect_textroom(self, websocket: WebSocket, room_id: int):
+        if room_id in self.textroom_connections and room_id in self.textroom_connections[room_id]:
+            self.textroom_connections[room_id][room_id].remove(websocket)
+            if not self.textroom_connections[room_id][room_id]:
+                del self.textroom_connections[room_id][room_id]
+                if not self.textroom_connections[room_id]:
+                    del self.textroom_connections[room_id]
 
-    async def broadcast_textroom(self, server_id: int, room_id: int, message: str):
-        if server_id in self.textroom_connections and room_id in self.textroom_connections[server_id]:
-            for connection in self.textroom_connections[server_id][room_id]:
+    async def broadcast_textroom(self, room_id: int, message: str):
+        if room_id in self.textroom_connections and room_id in self.textroom_connections[room_id]:
+            for connection in self.textroom_connections[room_id][room_id]:
                 await connection.send_text(message)
 
 websocket_manager = WebSocketManager()
@@ -352,6 +350,21 @@ def get_servers(user_id: int, db: db_dependency):
     db_servers.extend(owned_servers)
     return db_servers
 
+@app.put("/server/{server_id}/edit", response_model=Server)
+def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
+    db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not db_server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    
+    db_server.name = server_name
+    db_server.description = server_description
+    db.commit()
+    db.refresh(db_server)
+    
+    websocket_manager.broadcast_server(server_id, f"Server {server_id} has been updated")
+
+    return
+
 
 # Get a server by ID
 class GetServer(BaseModel):
@@ -547,10 +560,15 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
 
     return result
 
+# FastAPI WebSocket management already handles connections for main, server, and text rooms. 
+# The following code is already well-suited for handling the connections:
+connectedUsers = []
+
 @app.websocket("/ws/main/{user_id}")
 async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     """Handle WebSocket connections for the main server."""
     await websocket_manager.connect_main(websocket)
+    connectedUsers.append(user_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -559,6 +577,7 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     except WebSocketDisconnect:
         websocket_manager.disconnect_main(websocket)
         await websocket_manager.broadcast_main(f"User {user_id} disconnected from the main server")
+        connectedUsers.remove(user_id)
 
 @app.websocket("/ws/server/{server_id}/{user_id}")
 async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
@@ -573,17 +592,17 @@ async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_i
         websocket_manager.disconnect_server(websocket, server_id)
         await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
 
-@app.websocket("/ws/textroom/{server_id}/{room_id}/{user_id}")
-async def websocket_textroom_endpoint(websocket: WebSocket, server_id: int, room_id: int, user_id: int):
+@app.websocket("/ws/textroom/{room_id}/{user_id}")
+async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
     """Handle WebSocket connections for a specific text room."""
-    await websocket_manager.connect_textroom(websocket, server_id, room_id)
+    await websocket_manager.connect_textroom(websocket, room_id)
     # Notify about user joining the text room
-    await websocket_manager.broadcast_textroom(server_id, room_id, f"User {user_id} joined text room {room_id} in server {server_id}")
+    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined text room {room_id}")
     try:
         while True:
             data = await websocket.receive_text()
             # Handle text room messages
-            await websocket_manager.broadcast_textroom(server_id, room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
+            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
     except WebSocketDisconnect:
-        websocket_manager.disconnect_textroom(websocket, server_id, room_id)
-        await websocket_manager.broadcast_textroom(server_id, room_id, f"User {user_id} left text room {room_id} in server {server_id}")
+        websocket_manager.disconnect_textroom(websocket, room_id)
+        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
