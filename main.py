@@ -351,7 +351,7 @@ def get_servers(user_id: int, db: db_dependency):
     return db_servers
 
 @app.put("/server/{server_id}/edit", response_model=Server)
-def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
+async def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
     db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
     if not db_server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -361,9 +361,10 @@ def edit_server(server_id: int, server_name: str, server_description: str, db: d
     db.commit()
     db.refresh(db_server)
     
-    websocket_manager.broadcast_server(server_id, f"Server {server_id} has been updated")
+    # broadcast "server_updated" to all members
+    await websocket_manager.broadcast_server(server_id, "server_updated")
 
-    return
+    return db_server
 
 
 # Get a server by ID
