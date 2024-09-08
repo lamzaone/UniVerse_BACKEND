@@ -253,7 +253,6 @@ def google_auth(token_request: UserIn, db: db_dependency):
         db.add(db_user)
     else:
         db_user.token = token_request.id_token
-        db_user.refresh_token = generate_refresh_token()
         db_user.token_expiry = datetime.now() + timedelta(days=1)
         db_user.refresh_token_expiry = datetime.now() + timedelta(days=7)
 
@@ -456,7 +455,7 @@ def create_category(server_id: int, category_name: str, db: db_dependency):
 
 # Create a new room
 @app.post("/server/{server_id}/room/create", response_model=ServerRoom)
-def create_room(server_id: int, room_name: str, room_type: str, category_id: int, db: db_dependency):
+async def create_room(server_id: int, room_name: str, room_type: str, category_id: int, db: db_dependency):
     # Calculate the next position for the new room
     room_position = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id, models.ServerRoom.category_id == category_id).count()
     
@@ -471,29 +470,22 @@ def create_room(server_id: int, room_name: str, room_type: str, category_id: int
     db.add(db_room)
     db.commit()
     db.refresh(db_room)
+
+    await websocket_manager.broadcast_server(server_id, "rooms_updated")
     
     return db_room
 
-
-@app.put("/server/edit/{server_id}", response_model=Server)
-def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
-    db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
-    if not db_server:
-        raise HTTPException(status_code=404, detail="Server not found")
+@app.put("/server/{server_id}/room/{room_id}/delete", response_model=None)
+async def delete_room(server_id: int, room_id: int, db: db_dependency):
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not db_room:
+        raise HTTPException(status_code=404, detail="Room not found")
     
-    db_server.name = server_name
-    db_server.description = server_description
+    db.delete(db_room)
     db.commit()
-    db.refresh(db_server)
+
+    await websocket_manager.broadcast_server(server_id, "rooms_updated")
     
-    websocket_manager.broadcast_server(server_id, f"Server {server_id} has been updated")
-
-    return db_server
-
-
-
-
-
 
 # Fetch Categories and Rooms
 class RoomResponse(BaseModel):
@@ -562,14 +554,12 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
     return result
 
 # FastAPI WebSocket management already handles connections for main, server, and text rooms. 
-# The following code is already well-suited for handling the connections:
-connectedUsers = []
+
 
 @app.websocket("/ws/main/{user_id}")
 async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     """Handle WebSocket connections for the main server."""
     await websocket_manager.connect_main(websocket)
-    connectedUsers.append(user_id)
     try:
         while True:
             data = await websocket.receive_text()
@@ -578,7 +568,6 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     except WebSocketDisconnect:
         websocket_manager.disconnect_main(websocket)
         await websocket_manager.broadcast_main(f"User {user_id} disconnected from the main server")
-        connectedUsers.remove(user_id)
 
 @app.websocket("/ws/server/{server_id}/{user_id}")
 async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
