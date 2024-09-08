@@ -1,7 +1,7 @@
 import base64
 from fastapi import FastAPI, HTTPException, Depends, Body, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from typing import Annotated, List, Dict
+from typing import Annotated, List, Dict, Optional
 from sqlalchemy.orm import Session
 import requests
 from datetime import datetime, timedelta
@@ -139,8 +139,12 @@ class ServerRoom(BaseModel):
     type: str
     server_id: int
     name: str
-    category_id: int
+    category_id: Optional[int]
     position: int
+
+    class Config:
+        orm_mode = True
+        from_attributes=True
 
 class ServerMember(BaseModel):
     user_id: int
@@ -455,10 +459,13 @@ def create_category(server_id: int, category_name: str, db: db_dependency):
 
 # Create a new room
 @app.post("/server/{server_id}/room/create", response_model=ServerRoom)
-async def create_room(server_id: int, room_name: str, room_type: str, category_id: int, db: db_dependency):
+async def create_room(server_id: int, room_name: str, room_type: str, db: db_dependency, category_id: int = None):
     # Calculate the next position for the new room
-    room_position = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id, models.ServerRoom.category_id == category_id).count()
-    
+    room_position = db.query(models.ServerRoom).filter(
+        models.ServerRoom.server_id == server_id, 
+        models.ServerRoom.category_id == category_id
+    ).count() if category_id is not None else 0  # Handle None category_id case
+
     db_room = models.ServerRoom(
         name=room_name,
         type=room_type,
@@ -492,7 +499,7 @@ class RoomResponse(BaseModel):
     id: int
     name: str
     type: str
-    category_id: int
+    category_id: Optional[int]
     position: int
 
     class Config:
@@ -500,7 +507,7 @@ class RoomResponse(BaseModel):
         from_attributes=True
 
 class CategoryResponse(BaseModel):
-    id: int
+    id: Optional[int]
     name: str
     position: int
     rooms: List[RoomResponse] = []
@@ -537,12 +544,12 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
             'position': category.position,
             'rooms': []
         }
-        category_rooms = [RoomResponse.from_orm(room) for room in room_map.get(category.id, [])]
+        category_rooms = [RoomResponse.model_validate(room) for room in room_map.get(category.id, [])]
         category_dict['rooms'] = category_rooms
         result.append(CategoryResponse(**category_dict))
 
     # Also add uncategorized rooms (rooms with category_id = None)
-    uncategorized_rooms = [RoomResponse.from_orm(room) for room in room_map.get(None, [])]
+    uncategorized_rooms = [RoomResponse.model_validate(room) for room in room_map.get(None, [])]
     if uncategorized_rooms:
         result.append(CategoryResponse(
             id=None, 
