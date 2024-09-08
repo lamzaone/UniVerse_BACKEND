@@ -1,7 +1,7 @@
 import base64
-from fastapi import FastAPI, HTTPException, Depends, Body
+from fastapi import FastAPI, HTTPException, Depends, Body, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from typing import Annotated, List
+from typing import Annotated, List, Dict
 from sqlalchemy.orm import Session
 import requests
 from datetime import datetime, timedelta
@@ -10,17 +10,75 @@ import secrets
 import json
 import models
 from fastapi.middleware.cors import CORSMiddleware
-from google.oauth2 import id_token
-import requests
 import logging
 import os
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB async client
+from bson import ObjectId
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 CLIENT_ID = "167769953872-b5rnqtgjtuhvl09g45oid5r9r0lui2d6.apps.googleusercontent.com"
+
+# WebSocket Connections Manager
+class WebSocketManager:
+    def __init__(self):
+        self.main_connections: List[WebSocket] = []
+        self.server_connections: Dict[int, List[WebSocket]] = {}  # server_id to list of WebSockets
+        self.textroom_connections: Dict[int, Dict[int, List[WebSocket]]] = {}  # server_id to room_id to list of WebSockets
+
+    # Handle connections for the main server
+    async def connect_main(self, websocket: WebSocket):
+        await websocket.accept()
+        self.main_connections.append(websocket)
+
+    def disconnect_main(self, websocket: WebSocket):
+        self.main_connections.remove(websocket)
+
+    async def broadcast_main(self, message: str):
+        for connection in self.main_connections:
+            await connection.send_text(message)
+
+    # Handle connections for specific servers
+    async def connect_server(self, websocket: WebSocket, server_id: int):
+        await websocket.accept()
+        if server_id not in self.server_connections:
+            self.server_connections[server_id] = []
+        self.server_connections[server_id].append(websocket)
+
+    def disconnect_server(self, websocket: WebSocket, server_id: int):
+        if server_id in self.server_connections:
+            self.server_connections[server_id].remove(websocket)
+
+    async def broadcast_server(self, server_id: int, message: str):
+        if server_id in self.server_connections:
+            for connection in self.server_connections[server_id]:
+                await connection.send_text(message)
+
+    # Handle connections for text rooms
+    async def connect_textroom(self, websocket: WebSocket, server_id: int, room_id: int):
+        await websocket.accept()
+        if server_id not in self.textroom_connections:
+            self.textroom_connections[server_id] = {}
+        if room_id not in self.textroom_connections[server_id]:
+            self.textroom_connections[server_id][room_id] = []
+        self.textroom_connections[server_id][room_id].append(websocket)
+
+    def disconnect_textroom(self, websocket: WebSocket, server_id: int, room_id: int):
+        if server_id in self.textroom_connections and room_id in self.textroom_connections[server_id]:
+            self.textroom_connections[server_id][room_id].remove(websocket)
+            if not self.textroom_connections[server_id][room_id]:
+                del self.textroom_connections[server_id][room_id]
+                if not self.textroom_connections[server_id]:
+                    del self.textroom_connections[server_id]
+
+    async def broadcast_textroom(self, server_id: int, room_id: int, message: str):
+        if server_id in self.textroom_connections and room_id in self.textroom_connections[server_id]:
+            for connection in self.textroom_connections[server_id][room_id]:
+                await connection.send_text(message)
+
+websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +87,10 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
 )
+
+MONGO_DATABASE_URL = "mongodb://localhost:27017"
+mongo_client = AsyncIOMotorClient(MONGO_DATABASE_URL)
+mongo_db = mongo_client.uniVerse
 
 def get_db():
     db = SessionLocal()
@@ -111,7 +173,7 @@ def get_db():
         db.close()
 
 def generate_token():
-    return secrets.token_urlsafe(32)
+    return secrets.token_urlsafe(64)
 
 def generate_refresh_token():
     return secrets.token_urlsafe(64)
@@ -398,90 +460,28 @@ def create_room(server_id: int, room_name: str, room_type: str, category_id: int
     
     return db_room
 
-# Update Room Order
-@app.put("/server/room/{room_id}/reorder")
-def reorder_room(room_id: int, new_position: int, db: db_dependency):
-    # Fetch the room to be reordered
-    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+
+@app.put("/server/edit/{server_id}", response_model=Server)
+def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
+    db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not db_server:
+        raise HTTPException(status_code=404, detail="Server not found")
     
-    if not db_room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Fetch all rooms in the same category
-    rooms_in_category = (
-        db.query(models.ServerRoom)
-        .filter(
-            models.ServerRoom.server_id == db_room.server_id,
-            models.ServerRoom.category_id == db_room.category_id
-        )
-        .order_by(models.ServerRoom.position)
-        .all()
-    )
-
-    # Remove the room being reordered from the list
-    rooms_in_category.remove(db_room)
-
-    # Insert the room at the new position
-    rooms_in_category.insert(new_position, db_room)
-
-    # Reassign positions for all rooms in this category
-    for index, room in enumerate(rooms_in_category):
-        room.position = index
-
+    db_server.name = server_name
+    db_server.description = server_description
     db.commit()
-    db.refresh(db_room)
-
-    return db_room
-
-
-
-# Move Room to Another Category
-@app.put("/server/room/{room_id}/move")
-def move_room(room_id: int, new_category_id: int, new_position: int, db: db_dependency):
-    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    db.refresh(db_server)
     
-    if not db_room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Reorder rooms in the current category after removing the room
-    current_category_rooms = (
-        db.query(models.ServerRoom)
-        .filter(
-            models.ServerRoom.server_id == db_room.server_id,
-            models.ServerRoom.category_id == db_room.category_id
-        )
-        .order_by(models.ServerRoom.position)
-        .all()
-    )
-    # Remove the room from its current category
-    current_category_rooms.remove(db_room)
+    websocket_manager.broadcast_server(server_id, f"Server {server_id} has been updated")
 
-    # Update positions of remaining rooms in the current category
-    for index, room in enumerate(current_category_rooms):
-        room.position = index
-
-    # Fetch all rooms in the new category to adjust the order
-    new_category_rooms = (
-        db.query(models.ServerRoom)
-        .filter(
-            models.ServerRoom.server_id == db_room.server_id,
-            models.ServerRoom.category_id == new_category_id
-        )
-        .order_by(models.ServerRoom.position)
-        .all()
-    )
-
-    # Insert the room at the specified position in the new category
-    new_category_rooms.insert(new_position, db_room)
-
-    # Reassign positions for all rooms in the new category
-    for index, room in enumerate(new_category_rooms):
-        room.position = index
-    
-    # Update the room to the new
+    return db_server
 
 
 
+
+
+
+# Fetch Categories and Rooms
 class RoomResponse(BaseModel):
     id: int
     name: str
@@ -546,3 +546,44 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
         ))
 
     return result
+
+@app.websocket("/ws/main/{user_id}")
+async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
+    """Handle WebSocket connections for the main server."""
+    await websocket_manager.connect_main(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle main server messages or updates
+            await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_main(websocket)
+        await websocket_manager.broadcast_main(f"User {user_id} disconnected from the main server")
+
+@app.websocket("/ws/server/{server_id}/{user_id}")
+async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
+    """Handle WebSocket connections for a specific server."""
+    await websocket_manager.connect_server(websocket, server_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle messages related to the server
+            await websocket_manager.broadcast_server(server_id, f"Message from User {user_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_server(websocket, server_id)
+        await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
+
+@app.websocket("/ws/textroom/{server_id}/{room_id}/{user_id}")
+async def websocket_textroom_endpoint(websocket: WebSocket, server_id: int, room_id: int, user_id: int):
+    """Handle WebSocket connections for a specific text room."""
+    await websocket_manager.connect_textroom(websocket, server_id, room_id)
+    # Notify about user joining the text room
+    await websocket_manager.broadcast_textroom(server_id, room_id, f"User {user_id} joined text room {room_id} in server {server_id}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle text room messages
+            await websocket_manager.broadcast_textroom(server_id, room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_textroom(websocket, server_id, room_id)
+        await websocket_manager.broadcast_textroom(server_id, room_id, f"User {user_id} left text room {room_id} in server {server_id}")
