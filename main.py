@@ -442,7 +442,7 @@ def join_server(server_info: JoinServer, db: db_dependency):
 
 # Create Room Category
 @app.post("/server/{server_id}/category/create", response_model=RoomCategory)
-def create_category(server_id: int, category_name: str, db: db_dependency):
+async def create_category(server_id: int, category_name: str, db: db_dependency):
     category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
     
     db_category = models.RoomCategory(
@@ -454,6 +454,8 @@ def create_category(server_id: int, category_name: str, db: db_dependency):
     db.add(db_category)
     db.commit()
     db.refresh(db_category)
+
+    await websocket_manager.broadcast_server(server_id, "rooms_updated")
     
     return db_category
 
@@ -493,6 +495,41 @@ async def delete_room(server_id: int, room_id: int, db: db_dependency):
 
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
     
+
+
+class RoomReorder(BaseModel):
+    room_id: int
+    position: int
+    category: Optional[int] = None
+
+
+@app.post("/room/{room_id}/reorder", response_model=None)
+async def reorder_room(new_info: RoomReorder, db: db_dependency):
+    # Get all rooms in the category
+    db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
+    if not db_rooms:
+        raise HTTPException(status_code=404, detail="No rooms found in the category")
+    
+    # Find the room to be reordered
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
+    
+    if new_info.category is not None and db_room.category_id != new_info.category:
+        if not db.query(models.RoomCategory).filter(models.RoomCategory.id == new_info.category).first():
+            raise HTTPException(status_code=404, detail="Category not found")
+
+        db_room.category_id = new_info.category
+        db_room.position = len(db_rooms)
+        db.commit()
+    
+    else:
+        db_rooms.remove(db_room)
+        db_rooms.insert(new_info.position, db_room)
+        for index, room in enumerate(db_rooms):
+            room.position = index
+        db.commit()
+
+    await websocket_manager.broadcast_server(db_room.server_id, "rooms_updated")
+
 
 # Fetch Categories and Rooms
 class RoomResponse(BaseModel):
@@ -603,3 +640,38 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
     except WebSocketDisconnect:
         websocket_manager.disconnect_textroom(websocket, room_id)
         await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
+
+
+
+#TODO: Add MongoDB endpoint to store messages
+
+# mongodb endpoint to store messages
+# message schema:
+# {
+#   "id": int
+#   "message": str
+#   "user_id": int
+#   "room_id": int
+#   "private": bool
+#   "timestamp": datetime
+#   "reply_to": Optional[int]
+# }
+
+class Message(BaseModel):
+    id: int
+    message: str
+    user_id: int
+    room_id: int
+    private: bool
+    timestamp: datetime
+    reply_to: Optional[int]
+
+    class Config:
+        orm_mode = True
+
+
+@app.post("/message")
+async def store_message(message: Message, db: db_dependency):
+    result = await mongo_db.messages.insert_one(message)
+    await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
+    return {"message": f"{message}", "id": str(result.inserted_id)}
