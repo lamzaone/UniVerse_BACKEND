@@ -80,7 +80,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],  # Adjust this to match your frontend's URL
+    allow_origins=["*"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
@@ -269,7 +269,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
         "email": db_user.email,
         "name": db_user.name,
         "nickname": db_user.nickname,
-        "picture": f"http://localhost:8000/images/{db_user.picture}",  # Provide URL for frontend
+        "picture": f"http://79.113.73.5:8000/images/{db_user.picture}",  # Provide URL for frontend
         "token": db_user.token,
         "refresh_token": db_user.refresh_token
     }
@@ -297,7 +297,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://localhost:8000/images/{db_user.picture}",
+        picture=f"http://79.113.73.5:8000/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -320,7 +320,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://localhost:8000/images/{db_user.picture}",
+        picture=f"http://79.113.73.5:8000/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -647,18 +647,6 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 
 
 #TODO: Add MongoDB endpoint to store messages
-
-# mongodb endpoint to store messages
-# message schema:
-# {
-#   "id": int
-#   "message": str
-#   "user_id": int
-#   "room_id": int
-#   "private": bool
-#   "timestamp": datetime
-#   "reply_to": Optional[int]
-# }
 
 class Message(BaseModel):
     id: int
