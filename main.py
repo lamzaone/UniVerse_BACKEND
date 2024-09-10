@@ -513,12 +513,15 @@ async def reorder_room(new_info: RoomReorder, db: db_dependency):
     # Find the room to be reordered
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
     
-    if new_info.category is not None and db_room.category_id != new_info.category:
+    if db_room.category_id != new_info.category:
         if not db.query(models.RoomCategory).filter(models.RoomCategory.id == new_info.category).first():
             raise HTTPException(status_code=404, detail="Category not found")
 
         db_room.category_id = new_info.category
-        db_room.position = len(db_rooms)
+        db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
+        db_rooms.insert(new_info.position, db_room)
+        for index, room in enumerate(db_rooms):
+            room.position = index
         db.commit()
     
     else:
