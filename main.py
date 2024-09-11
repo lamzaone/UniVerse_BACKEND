@@ -666,3 +666,10 @@ async def store_message(message: Message, db: db_dependency):
     result = await mongo_db.messages.insert_one(message)
     await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
     return {"message": f"{message}", "id": str(result.inserted_id)}
+
+import uvicorn
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",  # Change "app:app" to the path where your FastAPI instance is created
+        host="0.0.0.0"
+    )
