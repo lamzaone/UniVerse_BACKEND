@@ -80,7 +80,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this to match your frontend's URL
+    allow_origins=["https://aetherial.cc"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
@@ -195,7 +195,7 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
 # Get user profile picture from the filesystem
-@app.get("/images/{image_name}")
+@app.get("/api/images/{image_name}")
 async def serve_image(image_name: str):
     """Endpoint to serve user images."""
     file_path = os.path.join(IMAGE_DIR, image_name)
@@ -205,7 +205,7 @@ async def serve_image(image_name: str):
 
 
 # Google authentication
-@app.post("/auth/google", response_model=User)
+@app.post("/api/auth/google", response_model=User)
 def google_auth(token_request: UserIn, db: db_dependency):
     # Verify the ID token
     id_token_response = requests.get(
@@ -269,7 +269,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
         "email": db_user.email,
         "name": db_user.name,
         "nickname": db_user.nickname,
-        "picture": f"http://79.113.73.5:8000/images/{db_user.picture}",  # Provide URL for frontend
+        "picture": f"https://aetherial.cc/api/images/{db_user.picture}",  # Provide URL for frontend
         "token": db_user.token,
         "refresh_token": db_user.refresh_token
     }
@@ -277,7 +277,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
     return db_user_data
 
 # Refresh token
-@app.post("/auth/refresh", response_model=User)
+@app.post("/api/auth/refresh", response_model=User)
 def refresh_tokens(token_request: TokenRequest, db: db_dependency):
     db_user = db.query(models.User).filter(models.User.refresh_token == token_request.token).first()
     if not db_user:
@@ -297,7 +297,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://79.113.73.5:8000/images/{db_user.picture}",
+        picture=f"https://aetherial.cc/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -305,7 +305,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
     return user_response
 
 # Validate token
-@app.post("/auth/validate", response_model=User)
+@app.post("/api/auth/validate", response_model=User)
 def validate_token(token_request: TokenRequest, db: db_dependency):
     db_user = db.query(models.User).filter(models.User.token == token_request.token).first()
     if not db_user:
@@ -320,7 +320,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://79.113.73.5:8000/images/{db_user.picture}",
+        picture=f"https://aetherial.cc/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -328,7 +328,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
     return user_response
 
 # Create a new server
-@app.post("/server/create", response_model=Server)
+@app.post("/api/server/create", response_model=Server)
 def create_server(server: ServerCreate, db: db_dependency):
     db_server = models.Server(
         name=server.name,
@@ -346,14 +346,14 @@ def create_server(server: ServerCreate, db: db_dependency):
     return db_server
 
 # Get all servers of user
-@app.get("/server/user/{user_id}", response_model=list[Server])
+@app.get("/api/server/user/{user_id}", response_model=list[Server])
 def get_servers(user_id: int, db: db_dependency):
     owned_servers = db.query(models.Server).filter(models.Server.owner_id == user_id).all()
     db_servers = db.query(models.Server).join(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()
     db_servers.extend(owned_servers)
     return db_servers
 
-@app.put("/server/{server_id}/edit", response_model=Server)
+@app.put("/api/server/{server_id}/edit", response_model=Server)
 async def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
     db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
     if not db_server:
@@ -374,7 +374,7 @@ async def edit_server(server_id: int, server_name: str, server_description: str,
 class GetServer(BaseModel):
     server_id: int
     user_id: int
-@app.post("/server", response_model=Server)
+@app.post("/api/server", response_model=Server)
 def get_server(server_info: GetServer, db: db_dependency):
     try:
         db_server = db.query(models.Server).filter(models.Server.id == server_info.server_id).first()
@@ -406,7 +406,7 @@ def get_server(server_info: GetServer, db: db_dependency):
 class JoinServer(BaseModel):
     invite_code: str
     user_id: int
-@app.post("/server/join", response_model=Server)
+@app.post("/api/server/join", response_model=Server)
 def join_server(server_info: JoinServer, db: db_dependency):
     try:
         # Fetch the server using the invite code
@@ -441,7 +441,7 @@ def join_server(server_info: JoinServer, db: db_dependency):
 
 
 # Create Room Category
-@app.post("/server/{server_id}/category/create", response_model=RoomCategory)
+@app.post("/api/server/{server_id}/category/create", response_model=RoomCategory)
 async def create_category(server_id: int, category_name: str, db: db_dependency):
     category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
     
@@ -460,7 +460,7 @@ async def create_category(server_id: int, category_name: str, db: db_dependency)
     return db_category
 
 # Create a new room
-@app.post("/server/{server_id}/room/create", response_model=ServerRoom)
+@app.post("/api/server/{server_id}/room/create", response_model=ServerRoom)
 async def create_room(server_id: int, room_name: str, room_type: str, db: db_dependency, category_id: int = None):
     # Calculate the next position for the new room
     room_position = db.query(models.ServerRoom).filter(
@@ -484,7 +484,7 @@ async def create_room(server_id: int, room_name: str, room_type: str, db: db_dep
     
     return db_room
 
-@app.put("/server/{server_id}/room/{room_id}/delete", response_model=None)
+@app.put("/api/server/{server_id}/room/{room_id}/delete", response_model=None)
 async def delete_room(server_id: int, room_id: int, db: db_dependency):
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
     if not db_room:
@@ -503,7 +503,7 @@ class RoomReorder(BaseModel):
     category: Optional[int] = None
 
 
-@app.post("/room/{room_id}/reorder", response_model=None)
+@app.post("/api/room/{room_id}/reorder", response_model=None)
 async def reorder_room(new_info: RoomReorder, db: db_dependency):
     # Get all rooms in the category
     db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
@@ -557,7 +557,7 @@ class CategoryResponse(BaseModel):
         from_attributes=True
 
 # Endpoint to get categories and rooms for a server
-@app.get("/server/{server_id}/categories", response_model=List[CategoryResponse])
+@app.get("/api/server/{server_id}/categories", response_model=List[CategoryResponse])
 def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
     # Retrieve all categories for the given server
     categories = (
@@ -603,7 +603,7 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
 # FastAPI WebSocket management already handles connections for main, server, and text rooms. 
 
 
-@app.websocket("/ws/main/{user_id}")
+@app.websocket("/api/ws/main/{user_id}")
 async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     """Handle WebSocket connections for the main server."""
     await websocket_manager.connect_main(websocket)
@@ -616,7 +616,7 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
         websocket_manager.disconnect_main(websocket)
         await websocket_manager.broadcast_main(f"User {user_id} disconnected from the main server")
 
-@app.websocket("/ws/server/{server_id}/{user_id}")
+@app.websocket("/api/ws/server/{server_id}/{user_id}")
 async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
     """Handle WebSocket connections for a specific server."""
     await websocket_manager.connect_server(websocket, server_id)
@@ -629,7 +629,7 @@ async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_i
         websocket_manager.disconnect_server(websocket, server_id)
         await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
 
-@app.websocket("/ws/textroom/{room_id}/{user_id}")
+@app.websocket("/api/ws/textroom/{room_id}/{user_id}")
 async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
     """Handle WebSocket connections for a specific text room."""
     await websocket_manager.connect_textroom(websocket, room_id)
@@ -661,7 +661,7 @@ class Message(BaseModel):
         orm_mode = True
 
 
-@app.post("/message")
+@app.post("/api/message")
 async def store_message(message: Message, db: db_dependency):
     result = await mongo_db.messages.insert_one(message)
     await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
