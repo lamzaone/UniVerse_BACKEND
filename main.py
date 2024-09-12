@@ -80,7 +80,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://aetherial.cc"],  # Adjust this to match your frontend's URL
+    allow_origins=["*"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
