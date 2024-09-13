@@ -507,8 +507,8 @@ class RoomReorder(BaseModel):
 async def reorder_room(new_info: RoomReorder, db: db_dependency):
     # Get all rooms in the category
     db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
-    if not db_rooms:
-        raise HTTPException(status_code=404, detail="No rooms found in the category")
+    # if not db_rooms:
+    #     raise HTTPException(status_code=404, detail="No rooms found in the category")
     
     # Find the room to be reordered
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
