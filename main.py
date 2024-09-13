@@ -80,13 +80,13 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this to match your frontend's URL
+    allow_origins=["https://coldra.in"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
 )
 
-MONGO_DATABASE_URL = "mongodb://localhost:27017"
+MONGO_DATABASE_URL = "mongodb://127.0.0.1:27017"
 mongo_client = AsyncIOMotorClient(MONGO_DATABASE_URL)
 mongo_db = mongo_client.uniVerse
 
@@ -269,7 +269,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
         "email": db_user.email,
         "name": db_user.name,
         "nickname": db_user.nickname,
-        "picture": f"https://aetherial.cc/api/images/{db_user.picture}",  # Provide URL for frontend
+        "picture": f"https://coldra.in/api/images/{db_user.picture}",  # Provide URL for frontend
         "token": db_user.token,
         "refresh_token": db_user.refresh_token
     }
@@ -297,7 +297,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"https://aetherial.cc/api/images/{db_user.picture}",
+        picture=f"https://coldra.in/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -320,7 +320,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"https://aetherial.cc/api/images/{db_user.picture}",
+        picture=f"https://coldra.in/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -649,7 +649,6 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 #TODO: Add MongoDB endpoint to store messages
 
 class Message(BaseModel):
-    id: int
     message: str
     user_id: int
     room_id: int
@@ -663,6 +662,8 @@ class Message(BaseModel):
 
 @app.post("/api/message")
 async def store_message(message: Message, db: db_dependency):
+    #make message a dict
+    message = message.dict()
     result = await mongo_db.messages.insert_one(message)
     await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
     return {"message": f"{message}", "id": str(result.inserted_id)}

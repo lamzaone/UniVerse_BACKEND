@@ -10,4 +10,4 @@ pip install -r requirements.txt
 uvicorn main:app
 ```
 
-Once running, you'll be able to access your docs by accessing http://localhost:8000/docs. There, you'll be able to test the endpoints.
+Once running, you'll be able to access your docs by accessing http://127.0.0.1:8000/docs. There, you'll be able to test the endpoints.
