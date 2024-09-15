@@ -18,6 +18,9 @@ Once running, you'll be able to access your docs by accessing http://127.0.0.1:8
 
 unix:
 
+REPLACE uniVerse with universe in database.py postgresql url
+
+
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw allow 22/tcp
@@ -37,3 +40,6 @@ GRANT ALL PRIVILEGES ON DATABASE uniVerse TO your_username;
 GRANT ALL PRIVILEGES ON SCHEMA public TO your_username;
 
 pip install uvicorn[standard]
+
+
+sudo chmod +777 fastapi/*    (fastapi = parent folder name)

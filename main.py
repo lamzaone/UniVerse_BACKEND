@@ -80,7 +80,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://coldra.in"],  # Adjust this to match your frontend's URL
+    allow_origins=["https://192.168.1.134.nip.io"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
@@ -119,7 +119,7 @@ class User(BaseModel):
     refresh_token: str
 
     class Config:
-        orm_mode = True
+        from_attributes=True
 
 class UserIn(BaseModel):
     id_token: str
@@ -143,7 +143,6 @@ class ServerRoom(BaseModel):
     position: int
 
     class Config:
-        orm_mode = True
         from_attributes=True
 
 class ServerMember(BaseModel):
@@ -269,7 +268,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
         "email": db_user.email,
         "name": db_user.name,
         "nickname": db_user.nickname,
-        "picture": f"https://coldra.in/api/images/{db_user.picture}",  # Provide URL for frontend
+        "picture": f"https://192.168.1.134.nip.io/api/images/{db_user.picture}",  # Provide URL for frontend
         "token": db_user.token,
         "refresh_token": db_user.refresh_token
     }
@@ -297,7 +296,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"https://coldra.in/api/images/{db_user.picture}",
+        picture=f"https://192.168.1.134.nip.io/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -320,7 +319,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"https://coldra.in/api/images/{db_user.picture}",
+        picture=f"https://192.168.1.134.nip.io/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -543,7 +542,6 @@ class RoomResponse(BaseModel):
     position: int
 
     class Config:
-        orm_mode = True
         from_attributes=True
 
 class CategoryResponse(BaseModel):
@@ -553,7 +551,6 @@ class CategoryResponse(BaseModel):
     rooms: List[RoomResponse] = []
 
     class Config:
-        orm_mode = True
         from_attributes=True
 
 # Endpoint to get categories and rooms for a server
@@ -655,10 +652,8 @@ class Message(BaseModel):
     private: bool
     timestamp: datetime
     reply_to: Optional[int]
-
     class Config:
-        orm_mode = True
-
+        from_attributes=True
 
 @app.post("/api/message")
 async def store_message(message: Message, db: db_dependency):
@@ -667,6 +662,28 @@ async def store_message(message: Message, db: db_dependency):
     result = await mongo_db.messages.insert_one(message)
     await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
     return {"message": f"{message}", "id": str(result.inserted_id)}
+
+
+class MessagesRetrieve(BaseModel):
+    room_id: int
+    user_token: str
+
+@app.post("/api/messages/{room_id}")
+async def get_messages(request:MessagesRetrieve, db: db_dependency):
+    db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    
+    messages = await mongo_db.messages.find({"room_id": request.room_id}).to_list(length=100)
+    return messages
+
+@app.post("/api/messages/{room_id}")
+async def get_messages(room_id: int):
+    messages = await mongo_db.messages.find({"room_id": room_id}).to_list(length=100)
+    return messages
 
 import uvicorn
 if __name__ == "__main__":
