@@ -668,7 +668,7 @@ class MessagesRetrieve(BaseModel):
     room_id: int
     user_token: str
 
-@app.post("/api/messages/{room_id}")
+@app.post("/api/messages/{room_id}", response_model=List[Message])
 async def get_messages(request:MessagesRetrieve, db: db_dependency):
     db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
     if not db_user:
@@ -680,10 +680,6 @@ async def get_messages(request:MessagesRetrieve, db: db_dependency):
     messages = await mongo_db.messages.find({"room_id": request.room_id}).to_list(length=100)
     return messages
 
-@app.post("/api/messages/{room_id}")
-async def get_messages(room_id: int):
-    messages = await mongo_db.messages.find({"room_id": room_id}).to_list(length=100)
-    return messages
 
 import uvicorn
 if __name__ == "__main__":
