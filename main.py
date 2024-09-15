@@ -78,7 +78,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://coldra.in"],  # Adjust this to match your frontend's URL
+    allow_origins=["https://coldra.in", "https://www.coldra.in"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
@@ -312,6 +312,48 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         raise HTTPException(status_code=400, detail="Token expired")
     
     # Convert binary picture to base64 string for the response
+    user_response = User(
+        id=db_user.id,
+        email=db_user.email,
+        name=db_user.name,
+        nickname=db_user.nickname,
+        picture=f"https://coldra.in/api/images/{db_user.picture}",
+        token=db_user.token,
+        refresh_token=db_user.refresh_token,
+    )
+    
+    return user_response
+
+
+@app.post("/api/users/info", response_model = List[User])
+async def get_users_info(user_ids: List[int], db: db_dependency): #needs a list of user ids, can be used for single ID as well
+    users = await db.query(User).filter(User.id.in_(user_ids)).all()
+    if not users:
+        raise HTTPException(status_code=404, detail="Users not found")
+    
+    users_response = []
+    for user in users:
+        user_response = User(
+            id=user.id,
+            email=user.email,
+            name=user.name,
+            nickname=user.nickname,
+            picture=f"https://coldra.in/api/images/{user.picture}",
+            token=user.token,
+            refresh_token=user.refresh_token,
+        )
+        users_response.append(user_response)
+        
+    return users_response
+
+
+@app.get("/api/user/{user_id}", response_model=User)
+def get_user(user_id: int, db: db_dependency):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+        # Convert binary picture to base64 string for the response
     user_response = User(
         id=db_user.id,
         email=db_user.email,
@@ -677,6 +719,7 @@ async def get_messages(request:MessagesRetrieve, db: db_dependency):
     
     messages = await mongo_db.messages.find({"room_id": request.room_id}).to_list(length=100)
     return messages
+
 
 
 import uvicorn
