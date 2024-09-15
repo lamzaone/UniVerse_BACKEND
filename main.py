@@ -64,16 +64,14 @@ class WebSocketManager:
         self.textroom_connections[room_id].append(websocket)
 
     def disconnect_textroom(self, websocket: WebSocket, room_id: int):
-        if room_id in self.textroom_connections and room_id in self.textroom_connections[room_id]:
-            self.textroom_connections[room_id][room_id].remove(websocket)
-            if not self.textroom_connections[room_id][room_id]:
-                del self.textroom_connections[room_id][room_id]
-                if not self.textroom_connections[room_id]:
-                    del self.textroom_connections[room_id]
+        if room_id in self.textroom_connections:
+            self.textroom_connections[room_id].remove(websocket)
+            if not self.textroom_connections[room_id]:
+                del self.textroom_connections[room_id]
 
     async def broadcast_textroom(self, room_id: int, message: str):
-        if room_id in self.textroom_connections and room_id in self.textroom_connections[room_id]:
-            for connection in self.textroom_connections[room_id][room_id]:
+        if room_id in self.textroom_connections:
+            for connection in self.textroom_connections[room_id]:
                 await connection.send_text(message)
 
 websocket_manager = WebSocketManager()
@@ -658,9 +656,9 @@ class Message(BaseModel):
 @app.post("/api/message")
 async def store_message(message: Message, db: db_dependency):
     #make message a dict
-    message = message.dict()
+    message = message.model_dump()
     result = await mongo_db.messages.insert_one(message)
-    await websocket_manager.broadcast_textroom(message["room_id"], message["message"])
+    await websocket_manager.broadcast_textroom(message["room_id"], "new_message") # TODO: FIX THIS NOT WORKING
     return {"message": f"{message}", "id": str(result.inserted_id)}
 
 
