@@ -684,42 +684,86 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 
 
 #TODO: Add MongoDB endpoint to store messages
-
 class Message(BaseModel):
     message: str
-    user_id: int
+    user_token: str
     room_id: int
-    private: bool
-    timestamp: datetime
-    reply_to: Optional[int]
+    is_private: bool
+    reply_to: Optional[int] = None
+
     class Config:
-        from_attributes=True
+        from_attributes = True
 
-@app.post("/api/message")
-async def store_message(message: Message, db: db_dependency):
-    #make message a dict
-    message = message.model_dump()
-    result = await mongo_db.messages.insert_one(message)
-    await websocket_manager.broadcast_textroom(message["room_id"], "new_message") # TODO: FIX THIS NOT WORKING
-    return {"message": f"{message}", "id": str(result.inserted_id)}
-
+class MessageResponse(BaseModel):
+    message: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[int]
+    user_id: int
+    timestamp: datetime
+    _id: str  # Use _id directly from MongoDB
 
 class MessagesRetrieve(BaseModel):
     room_id: int
     user_token: str
 
-@app.post("/api/messages/", response_model=List[Message])
-async def get_messages(request:MessagesRetrieve, db: db_dependency):
+@app.post("/api/message", response_model=MessageResponse)
+async def store_message(message: Message, db: db_dependency) -> MessageResponse:
+    # Get user from token
+    db_user = db.query(models.User).filter(models.User.token == message.user_token).first()
+
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid user token")
+
+    # Prepare the message data
+    message_data = {
+        "message": message.message,
+        "user_id": db_user.id,
+        "room_id": message.room_id,
+        "is_private": message.is_private,
+        "reply_to": message.reply_to,
+        "timestamp": datetime.now(),
+    }
+
+    # Insert the message into the database
+    result = await mongo_db.messages.insert_one(message_data)
+
+    # Broadcast the new message to the text room
+    await websocket_manager.broadcast_textroom(message_data["room_id"], "new_message")
+
+    # Return the response including _id
+    return MessageResponse(
+        message=message_data["message"],
+        room_id=message_data["room_id"],
+        is_private=message_data["is_private"],
+        reply_to=message_data["reply_to"],
+        user_id=message_data["user_id"],
+        timestamp=message_data["timestamp"],
+        _id=str(result.inserted_id)  # Use _id from MongoDB
+    )
+
+@app.post("/api/messages/", response_model=List[MessageResponse])
+async def get_messages(request: MessagesRetrieve, db: db_dependency):
+    # Verify the user token
     db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
+
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid token")
-    
+
     if db_user.token_expiry < datetime.now():
         raise HTTPException(status_code=400, detail="Token expired")
-    
-    messages = await mongo_db.messages.find({"room_id": request.room_id}).to_list(length=100)
-    return messages
 
+    # Retrieve the last 100 messages from MongoDB in descending order
+    messages = await mongo_db.messages.find({"room_id": request.room_id}).sort("timestamp", -1).limit(100).to_list(length=100)
+
+    # Reverse the order of the messages
+    messages.reverse()
+
+    # Return messages directly with _id from MongoDB
+    for message in messages:
+        message['_id'] = str(message['_id'])  # Ensure _id is returned as a string
+
+    return messages
 
 
 import uvicorn
