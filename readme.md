@@ -16,30 +16,41 @@ Once running, you'll be able to access your docs by accessing http://127.0.0.1:8
 
 
 
-unix:
+# Unix setup for VM:
 
-REPLACE uniVerse with universe in database.py postgresql url
-
-
+1. sudo apt-get update
+2. sudo apt-get upgrade
+3. sudo apt install postgresql
+4. sudo apt-get install libpq-dev
+5. sudo apt install ufw
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw allow 22/tcp
 sudo ufw allow 8000/tcp
 sudo ufw enable
 
+
+
+sudo service postgresql start
 sudo -i -u postgres
-psql
 
-CREATE DATABASE uniVerse;
-CREATE USER your_username WITH PASSWORD 'your_password';
-GRANT ALL PRIVILEGES ON DATABASE uniVerse TO your_username;
-psql
+CREATE USER ubuntu WITH LOGIN PASSWORD 'pass';
+CREATE DATABASE universe;
+GRANT ALL PRIVILEGES ON DATABASE universe TO ubuntu;
+ALTER ROLE ubuntu CREATEDB;
+ALTER ROLE ubuntu SUPERUSER;
 
-GRANT ALL PRIVILEGES ON DATABASE uniVerse TO your_username;
-\c uniVerse
-GRANT ALL PRIVILEGES ON SCHEMA public TO your_username;
+\c universe
+GRANT ALL PRIVILEGES ON SCHEMA public TO ubuntu;
+replace uniVerse with universe in database.py postgresql url
 
-pip install uvicorn[standard]
+cd /path/to/repo
+sudo apt install python3.12-venv
+sudo apt install python3
+sudo python3 -m venv venv
 
+source venv/bin/activate
+pip install -r requirements.txt
 
-sudo chmod +777 fastapi/*    (fastapi = parent folder name)
+uvicorn main:app to launch
+
