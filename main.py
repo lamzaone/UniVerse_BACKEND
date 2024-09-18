@@ -191,14 +191,14 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         logging.error(f"Failed to fetch image from URL: {image_url}")
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
-# Get user profile picture from the filesystem
-@app.get("/api/images/{image_name}")
-async def serve_image(image_name: str):
-    """Endpoint to serve user images."""
-    file_path = os.path.join(IMAGE_DIR, image_name)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(file_path)
+# # Get user profile picture from the filesystem
+# @app.get("/api/images/{image_name}")
+# async def serve_image(image_name: str):
+#     """Endpoint to serve user images."""
+#     file_path = os.path.join(IMAGE_DIR, image_name)
+#     if not os.path.exists(file_path):
+#         raise HTTPException(status_code=404, detail="Image not found")
+#     return FileResponse(file_path)
 
 
 # Google authentication

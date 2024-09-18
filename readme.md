@@ -44,7 +44,9 @@ ALTER ROLE ubuntu SUPERUSER;
 GRANT ALL PRIVILEGES ON SCHEMA public TO ubuntu;
 replace uniVerse with universe in database.py postgresql url
 
-cd /path/to/repo
+sudo chmod +777 /path/to/repo/
+sudo chmod +777 /path/to/repo/*
+cd /path/to/repo/
 sudo apt install python3.12-venv
 sudo apt install python3
 sudo python3 -m venv venv
