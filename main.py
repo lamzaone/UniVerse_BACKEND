@@ -21,6 +21,24 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 CLIENT_ID = "167769953872-b5rnqtgjtuhvl09g45oid5r9r0lui2d6.apps.googleusercontent.com"
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def generate_token():
+    return secrets.token_urlsafe(32)
+
+def generate_refresh_token():
+    refresh_token = secrets.token_urlsafe(64)
+    return refresh_token
+
+db_dependency = Annotated[Session, Depends(get_db)]
+
+
 # WebSocket Connections Manager
 class WebSocketManager:
     def __init__(self):
@@ -74,6 +92,74 @@ class WebSocketManager:
             for connection in self.textroom_connections[room_id]:
                 await connection.send_text(message)
 
+    async def get_friends_connected_main(self, user_id: int, db: db_dependency) -> List[int]:
+        # Query for the user's friends from the database
+        db_user = db.query(models.User).filter(models.User.id == user_id).first()
+        if not db_user:
+            raise HTTPException(status_code=400, detail="User not found")
+        
+        # Assuming friendships are stored in a "Friend" model
+        friends = db.query(models.Friend).filter(models.Friend.user_id == user_id).all()
+        
+        # Extract friend IDs
+        friend_ids = [friend.friend_id for friend in friends]
+        
+        # Check which friends are connected via WebSocket to the main server
+        connected_friends = [
+            friend_id for friend_id in friend_ids
+            if any(conn.user_id == friend_id for conn in websocket_manager.main_connections)
+        ]
+        
+        return connected_friends
+    
+    async def get_users_connected_server(self, server_id: int):
+        if server_id not in websocket_manager.server_connections:
+            return []
+
+        # Collect user IDs from WebSocket connections for the specific server
+        connected_users = [conn.user_id for conn in websocket_manager.server_connections[server_id]]
+
+        return connected_users
+    
+    async def broadcast_user_update(self, user_id: int, update_message: str, db: db_dependency):
+        async def get_friends_connected_main(user_id: int, db: db_dependency) -> List[int]:
+            # Query for the user's friends from the database
+            db_user = db.query(models.User).filter(models.User.id == user_id).first()
+            if not db_user:
+                raise HTTPException(status_code=400, detail="User not found")
+            
+            # Assuming friendships are stored in a "Friend" model
+            friends = db.query(models.Friend).filter(models.Friend.user_id == user_id).all()
+            
+            # Extract friend IDs
+            friend_ids = [friend.friend_id for friend in friends]
+            
+            # Check which friends are connected via WebSocket to the main server
+            connected_friends = [
+                friend_id for friend_id in friend_ids
+                if any(conn.user_id == friend_id for conn in websocket_manager.main_connections)
+            ]
+            
+            return connected_friends
+        
+        # Get the user's friends
+        friends = await get_friends_connected_main(user_id)
+        
+        # Get all servers the user is connected to
+        user_servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()
+        server_ids = [server.server_id for server in user_servers]
+        
+        # Broadcast to friends on the main server
+        for friend_id in friends:
+            await websocket_manager.broadcast_main(f"User {friend_id}: {update_message}")
+        
+        # Broadcast to users in the same servers
+        for server_id in server_ids:
+            await websocket_manager.broadcast_server(server_id, f"User {user_id}: {update_message}")
+
+
+
+
 websocket_manager = WebSocketManager()
 
 app.add_middleware(
@@ -88,21 +174,6 @@ MONGO_DATABASE_URL = "mongodb://127.0.0.1:27017"
 mongo_client = AsyncIOMotorClient(MONGO_DATABASE_URL)
 mongo_db = mongo_client.uniVerse
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def generate_token():
-    return secrets.token_urlsafe(32)
-
-def generate_refresh_token():
-    refresh_token = secrets.token_urlsafe(64)
-    return refresh_token
-
-db_dependency = Annotated[Session, Depends(get_db)]
 
 class TokenRequest(BaseModel):
     token: str
@@ -535,6 +606,29 @@ async def delete_room(server_id: int, room_id: int, db: db_dependency):
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
     
 
+class AccessIn(BaseModel):
+    token: str
+    server_id: int
+
+@app.post("/api/server/access", response_model=int)
+async def check_access(access_info: AccessIn, db: db_dependency):
+    user = db.query(models.User).filter(models.User.token == access_info.token).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    #get "access_level"
+    member = db.query(models.ServerMember).filter(models.ServerMember.user_id == user.id, models.ServerMember.server_id == access_info.server_id).first()
+    if not member:
+        # check if user is owner
+        server_owner = db.query(models.Server).filter(models.Server.id == access_info.server_id).first().owner_id
+        if user.id == server_owner:
+            return 3
+        else:
+            raise HTTPException(status_code=404, detail="User not found in server")
+    return member.access_level
+
+
+
 
 class RoomReorder(BaseModel):
     room_id: int
@@ -643,6 +737,7 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
 @app.websocket("/api/ws/main/{user_id}")
 async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
     """Handle WebSocket connections for the main server."""
+    websocket.user_id = user_id
     await websocket_manager.connect_main(websocket)
     try:
         while True:
@@ -656,7 +751,10 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int):
 @app.websocket("/api/ws/server/{server_id}/{user_id}")
 async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
     """Handle WebSocket connections for a specific server."""
+    
+    websocket.user_id = user_id
     await websocket_manager.connect_server(websocket, server_id)
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -668,6 +766,8 @@ async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_i
 
 @app.websocket("/api/ws/textroom/{room_id}/{user_id}")
 async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    
+    websocket.user_id = user_id
     """Handle WebSocket connections for a specific text room."""
     await websocket_manager.connect_textroom(websocket, room_id)
     # Notify about user joining the text room
@@ -765,6 +865,24 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency):
 
     return messages
 
+
+@app.get("/api/server/{server_id}/online", response_model=List[int])
+async def get_online_members(server_id: int):
+    connected_users = await websocket_manager.get_users_connected_server(server_id)
+    return connected_users
+
+@app.get("/api/server/{server_id}/users", response_model=List[int])
+async def get_server_users(server_id: int, db: db_dependency):
+    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    user_ids = [user.user_id for user in server_users]
+    user_ids.append(owner_id)
+    return user_ids
+
+@app.get("/api/user/friends/", response_model=List[int])
+async def get_friends(user_id: int, db: db_dependency):
+    friends = db.query(models.Friend).filter(models.Friend.user_id == user_id).all()
+    return [friend.friend_id for friend in friends]
 
 import uvicorn
 if __name__ == "__main__":
