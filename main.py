@@ -592,14 +592,13 @@ async def check_access(access_info: AccessIn, db: db_dependency):
     
     #get "access_level"
     member = db.query(models.ServerMember).filter(models.ServerMember.user_id == user.id, models.ServerMember.server_id == access_info.server_id).first()
-    if not member:
-        # check if user is owner
-        server_owner = db.query(models.Server).filter(models.Server.id == access_info.server_id).first().owner_id
-        if user.id == server_owner:
-            return 3
-        else:
-            raise HTTPException(status_code=404, detail="User not found in server")
-    return member.access_level
+    if (member):
+        return member.access_level if member.access_level else 0
+    server_owner = db.query(models.Server).filter(models.Server.id == access_info.server_id).first().owner_id
+    if user.id == server_owner:
+        return 3
+    else:
+        raise HTTPException(status_code=404, detail="User not found in server")
 
 
 
