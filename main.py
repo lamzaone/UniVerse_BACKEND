@@ -155,39 +155,55 @@ class WebSocketManager:
             for connection in self.textroom_connections[room_id]:
                 await connection.send_text(message)
 
-    async def broadcastConnections(self, update_message: str, user_id: int, servers: List[int], friends: List[int] = None):
-        # Broadcast to friends on the main server
-        if friends:
-            for connection in self.main_connections:
-                if connection.user_id in friends:
-                    try:
-                        await connection.send_text(f"{user_id}: {update_message}")
-                    except WebSocketDisconnect:
-                        # Log and remove disconnected connection
-                        print(f"Friend {connection.user_id} disconnected")
-                        self.main_connections.remove(connection)
-                    except Exception as e:
-                        # Catch other exceptions
-                        print(f"Error sending message to friend {connection.user_id}: {e}")
+    # async def broadcastConnections(self, update_message: str, user_id: int, servers: List[int], friends: List[int] = None):
+    #     # Broadcast to friends on the main server
+    #     if friends:
+    #         for connection in self.main_connections:
+    #             if connection.user_id in friends:
+    #                 try:
+    #                     await connection.send_text(f"{user_id}: {update_message}")
+    #                 except WebSocketDisconnect:
+    #                     # Log and remove disconnected connection
+    #                     print(f"Friend {connection.user_id} disconnected")
+    #                     self.main_connections.remove(connection)
+    #                 except Exception as e:
+    #                     # Catch other exceptions
+    #                     print(f"Error sending message to friend {connection.user_id}: {e}")
 
-        # Broadcast to users in the same servers
-        for server_id in servers:
-            try:
+    #     # Broadcast to users in the same servers
+    #     for server_id in servers:
+    #         try:
+    #             if server_id in self.server_connections:
+    #                 for connection in self.server_connections[server_id]:
+    #                     try:
+    #                         await connection.send_text(f"{user_id}: {update_message}")
+    #                     except WebSocketDisconnect:
+    #                         # Log and remove disconnected connection
+    #                         print(f"User {connection.user_id} in server {server_id} disconnected")
+    #                         self.server_connections[server_id].remove(connection)
+    #                     except Exception as e:
+    #                         # Catch other exceptions
+    #                         print(f"Error sending message to server {server_id}, user {connection.user_id}: {e}")
+    #         except Exception as e:
+    #             print(f"Error processing server {server_id}: {e}")
+
+    
+    async def broadcastConnections(self,update_message:str, user_id: int, servers: List[int], friends: List[int] = None):
+        # Broadcast to friends on the main server
+        try:
+            if friends:
+                for connection in self.main_connections:
+                    if connection.user_id in friends:
+                        await connection.send_text(f"{user_id}: {update_message}")
+
+            # Broadcast to users in the same servers
+            for server_id in servers:
                 if server_id in self.server_connections:
                     for connection in self.server_connections[server_id]:
-                        try:
-                            await connection.send_text(f"{user_id}: {update_message}")
-                        except WebSocketDisconnect:
-                            # Log and remove disconnected connection
-                            print(f"User {connection.user_id} in server {server_id} disconnected")
-                            self.server_connections[server_id].remove(connection)
-                        except Exception as e:
-                            # Catch other exceptions
-                            print(f"Error sending message to server {server_id}, user {connection.user_id}: {e}")
-            except Exception as e:
-                print(f"Error processing server {server_id}: {e}")
-
-
+                        await connection.send_text(f"{user_id}: {update_message}")
+        except Exception as e:
+            print(f"Error broadcasting connections: {e}")
+            pass
 
 
 
@@ -712,15 +728,18 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dep
     """Handle WebSocket connections for the main server."""
     websocket.user_id = user_id
     await websocket_manager.connect_main(websocket)         # Conect to socket
-    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
     try:
+        await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
         while True:
             data = await websocket.receive_text()
             # Handle main server messages or updates
             await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
     except WebSocketDisconnect:
         websocket_manager.disconnect_main(websocket)        # Disconnect from socket
-        await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
     except Exception as e:
         websocket_manager.disconnect_main(websocket)
         await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
