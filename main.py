@@ -728,21 +728,25 @@ async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dep
     """Handle WebSocket connections for the main server."""
     websocket.user_id = user_id
     await websocket_manager.connect_main(websocket)         # Conect to socket
+    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
     try:
-        await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
         while True:
             data = await websocket.receive_text()
             # Handle main server messages or updates
             await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
     except WebSocketDisconnect:
-        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
         try:
             await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
         except Exception as e:
             pass
+        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
+
     except Exception as e:
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
         websocket_manager.disconnect_main(websocket)
-        await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
 
 async def broadcast_status(user_id,status:str, db: db_dependency):
     servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()       # Get all servers of user
