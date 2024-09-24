@@ -627,6 +627,17 @@ class RoomReorder(BaseModel):
 
 @app.post("/api/room/{room_id}/reorder", response_model=None)
 async def reorder_room(new_info: RoomReorder, db: db_dependency):
+
+    # If position == 0 and category is null, set the category to None so the room becomes uncategorized and return
+    if (new_info.position == 0 and new_info.category is None):
+        new_info.category = None 
+        db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
+        db_room.category_id = None
+        db.commit()
+        db.refresh(db_room)
+        await websocket_manager.broadcast_server(db_room.server_id, "rooms_updated")
+        return 
+
     # Get all rooms in the category
     db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
     # if not db_rooms:
@@ -635,21 +646,26 @@ async def reorder_room(new_info: RoomReorder, db: db_dependency):
     # Find the room to be reordered
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
     
+    # If the category is changed
     if db_room.category_id != new_info.category:
+        # Check if the new category exists
         if not db.query(models.RoomCategory).filter(models.RoomCategory.id == new_info.category).first():
             raise HTTPException(status_code=404, detail="Category not found")
 
+        # Remove the room from the old category and insert it into the new category
         db_room.category_id = new_info.category
+        # get all rooms in the new category ordered by position for further processing below (*)
         db_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.category_id == new_info.category).order_by(models.ServerRoom.position).all()
-        db_rooms.insert(new_info.position, db_room)
-        for index, room in enumerate(db_rooms):
-            room.position = index
+        db_rooms.insert(new_info.position, db_room) # (*) insert the room into the new category at the new position
+        for index, room in enumerate(db_rooms):     # (*) update the position of all rooms in the new category to reflect the new order
+            room.position = index                   
         db.commit()
     
+    # If the category is the same
     else:
-        db_rooms.remove(db_room)
-        db_rooms.insert(new_info.position, db_room)
-        for index, room in enumerate(db_rooms):
+        db_rooms.remove(db_room)                        # remove the room from the list of rooms in the category to insert it back at the new position
+        db_rooms.insert(new_info.position, db_room)     # insert the room into the new position
+        for index, room in enumerate(db_rooms):         
             room.position = index
         db.commit()
 
@@ -710,13 +726,13 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
 
     # Also add uncategorized rooms (rooms with category_id = None)
     uncategorized_rooms = [RoomResponse.model_validate(room) for room in room_map.get(None, [])]
-    if uncategorized_rooms:
-        result.append(CategoryResponse(
-            id=None, 
-            name="Uncategorized", 
-            position=len(result), 
-            rooms=uncategorized_rooms
-        ))
+    # if uncategorized_rooms:
+    result.append(CategoryResponse(
+        id=None, 
+        name="Uncategorized", 
+        position=len(result), 
+        rooms=uncategorized_rooms
+    ))
 
     return result
 
@@ -791,8 +807,6 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
         await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
 
 
-
-#TODO: Add MongoDB endpoint to store messages
 class Message(BaseModel):
     message: str
     user_token: str
