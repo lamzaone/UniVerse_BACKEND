@@ -629,7 +629,7 @@ class RoomReorder(BaseModel):
 async def reorder_room(new_info: RoomReorder, db: db_dependency):
 
     # If position == 0 and category is null, set the category to None so the room becomes uncategorized and return
-    if (new_info.position == 0 and new_info.category is None):
+    if (new_info.category is None):
         new_info.category = None 
         db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == new_info.room_id).first()
         db_room.category_id = None
