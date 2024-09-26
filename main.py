@@ -453,6 +453,24 @@ def get_servers(user_id: int, db: db_dependency):
     db_servers.extend(owned_servers)
     return db_servers
 
+@app.get("/api/server/{server_id}/online", response_model=List[int])
+async def get_online_members(server_id: int, db: db_dependency):
+    connected_users = await get_users_connected_server(server_id, db=db)
+    return connected_users
+
+@app.get("/api/server/{server_id}/users", response_model=List[int])
+async def get_server_users(server_id: int, db: db_dependency):
+    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    user_ids = [user.user_id for user in server_users]
+    user_ids.append(owner_id)
+    return user_ids
+
+# @app.get("/api/user/friends/", response_model=List[int])
+# async def get_friends(user_id: int, db: db_dependency):
+#     friends = db.query(models.Friend).filter(models.Friend.user_id == user_id).all()
+#     return [friend.friend_id for friend in friends]
+
 @app.put("/api/server/{server_id}/edit", response_model=Server)
 async def edit_server(server_id: int, server_name: str, server_description: str, db: db_dependency):
     db_server = db.query(models.Server).filter(models.Server.id == server_id).first()
@@ -581,10 +599,9 @@ async def create_room(server_id: int, room_name: str, room_type: str, db: db_dep
     db.refresh(db_room)
 
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
-    
     return db_room
 
-@app.put("/api/server/{server_id}/room/{room_id}/delete", response_model=None)
+@app.put("/api/server/{server_id}/room/{room_id}/delete", response_model=str)
 async def delete_room(server_id: int, room_id: int, db: db_dependency):
     db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
     if not db_room:
@@ -594,7 +611,8 @@ async def delete_room(server_id: int, room_id: int, db: db_dependency):
     db.commit()
 
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
-    
+    return f"Room {room_id} has been deleted"
+
 
 class AccessIn(BaseModel):
     token: str
@@ -901,23 +919,6 @@ async def get_users_connected_server(server_id: int, db: db_dependency) -> List[
 
     return connected_users
 
-@app.get("/api/server/{server_id}/online", response_model=List[int])
-async def get_online_members(server_id: int, db: db_dependency):
-    connected_users = await get_users_connected_server(server_id, db=db)
-    return connected_users
-
-@app.get("/api/server/{server_id}/users", response_model=List[int])
-async def get_server_users(server_id: int, db: db_dependency):
-    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
-    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
-    user_ids = [user.user_id for user in server_users]
-    user_ids.append(owner_id)
-    return user_ids
-
-# @app.get("/api/user/friends/", response_model=List[int])
-# async def get_friends(user_id: int, db: db_dependency):
-#     friends = db.query(models.Friend).filter(models.Friend.user_id == user_id).all()
-#     return [friend.friend_id for friend in friends]
 
 import uvicorn
 if __name__ == "__main__":
