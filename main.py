@@ -581,8 +581,10 @@ async def create_category(server_id: int, category: CategoryCreateRequest, db: d
 
 # Create a new room
 @app.post("/api/server/{server_id}/room/create", response_model=ServerRoom)
-async def create_room(server_id: int, room_name: str, room_type: str, db: db_dependency, category_id: int = None):
+async def create_room(server_id: int, room_name: str, room_type: str, db: db_dependency, category_id: int | None = None):
     # Calculate the next position for the new room
+    if category_id == 0:
+        category_id = None
     room_position = db.query(models.ServerRoom).filter(
         models.ServerRoom.server_id == server_id, 
         models.ServerRoom.category_id == category_id
@@ -854,10 +856,24 @@ class MessagesRetrieve(BaseModel):
 async def store_message(message: Message, db: db_dependency) -> MessageResponse:
     # Get user from token
     db_user = db.query(models.User).filter(models.User.token == message.user_token).first()
-
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid user token")
-
+    
+    # check if user is part of the server or server owner
+    # get server from room ID
+    server = db.query(models.ServerRoom).filter(models.ServerRoom.id == message.room_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Room not found")
+    server = db.query(models.Server).filter(models.Server.id == server.server_id).first()
+    server_member = db.query(models.ServerMember).filter(models.ServerMember.user_id == db_user.id, models.ServerMember.server_id == server.id).first()
+    server_owner = db.query(models.Server).filter(models.Server.id == server.id, models.Server.owner_id == db_user.id).first()
+    if not server_member and not server_owner:
+        raise HTTPException(status_code=409, detail="User is not part of the server")
+    
+    
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    
     # Prepare the message data
     message_data = {
         "message": message.message,
@@ -889,6 +905,21 @@ async def store_message(message: Message, db: db_dependency) -> MessageResponse:
 async def get_messages(request: MessagesRetrieve, db: db_dependency):
     # Verify the user token
     db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
+
+    #get server from room id
+
+    # TODO: FIX CHECKING IF ROOM EXISTS AND ADD SERVERID TO MAKE SURE YOU CANT ACCESS ROOMS FROM OTHER SERVERS
+    server = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Room not found")
+    server_member = db.query(models.ServerMember).filter(models.ServerMember.user_id == db_user.id, models.ServerMember.server_id == server.server_id).first()
+    server_owner = db.query(models.Server).filter(models.Server.id == server.server_id, models.Server.owner_id == db_user.id).first()
+    if not server_member and not server_owner:
+        raise HTTPException(status_code=409, detail="User is not part of the server")
+
+    room = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
 
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid token")
