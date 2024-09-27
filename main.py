@@ -558,9 +558,11 @@ def join_server(server_info: JoinServer, db: db_dependency):
         raise HTTPException(status_code=500, detail="Internal Server Error") from e
 
 
-# Create Room Category
+class CategoryCreateRequest(BaseModel):
+    category_name: str
 @app.post("/api/server/{server_id}/category/create", response_model=RoomCategory)
-async def create_category(server_id: int, category_name: str, db: db_dependency):
+async def create_category(server_id: int, category: CategoryCreateRequest, db: db_dependency):
+    category_name = category.category_name
     category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
     
     db_category = models.RoomCategory(
