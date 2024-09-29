@@ -617,6 +617,17 @@ async def delete_room(server_id: int, room_id: int, db: db_dependency):
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
     return f"Room {room_id} has been deleted"
 
+@app.put("/api/server/{server_id}/category/{category_id}/delete", response_model=str)
+async def delete_category(server_id: int, category_id: int, db: db_dependency):
+    db_category = db.query(models.RoomCategory).filter(models.RoomCategory.id == category_id).first()
+    if not db_category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    db.delete(db_category)
+    db.commit()
+
+    await websocket_manager.broadcast_server(server_id, "rooms_updated")
+    return f"Category {category_id} has been deleted"
 
 class AccessIn(BaseModel):
     token: str
@@ -956,7 +967,7 @@ async def get_users_connected_server(server_id: int, db: db_dependency) -> List[
 import uvicorn
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",  # Change "app:app" to the path where your FastAPI instance is created
+        "main:app", 
         host="0.0.0.0"
     )
 
