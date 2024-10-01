@@ -435,7 +435,7 @@ def create_server(server: ServerCreate, db: db_dependency):
         description=server.description,
         owner_id=server.owner_id
     )
-    db_server.invite_code=secrets.token_urlsafe(6),
+    db_server.invite_code=secrets.token_urlsafe(4),
     db_server.created_at=datetime.now()
 
     
@@ -525,7 +525,7 @@ class JoinServer(BaseModel):
     invite_code: str
     user_id: int
 @app.post("/api/server/join", response_model=Server)
-def join_server(server_info: JoinServer, db: db_dependency):
+async def join_server(server_info: JoinServer, db: db_dependency):
     try:
         # Fetch the server using the invite code
         db_server = db.query(models.Server).filter(models.Server.invite_code == server_info.invite_code).first()
@@ -550,11 +550,14 @@ def join_server(server_info: JoinServer, db: db_dependency):
         db.add(db_member)
         db.commit()
 
+        await websocket_manager.broadcast_server(server_id=db_server.id, message=f"{server_info.user_id}: joined")
+
         # Return the server information
         return db_server
     
     except Exception as e:
         # Handle SQL-related errors
+        print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error") from e
 
 
