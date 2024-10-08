@@ -16,6 +16,7 @@ import os
 from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB async client
 from bson import ObjectId
+from basemodels import *
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -46,61 +47,6 @@ def get_db():
     finally:
         db.close()
 
-class TokenRequest(BaseModel):
-    token: str
-
-class User(BaseModel):
-    id: int
-    email: str
-    name: str
-    nickname: str
-    picture: str
-    token: str
-    refresh_token: str
-
-    class Config:
-        from_attributes=True
-
-class UserIn(BaseModel):
-    id_token: str
-    access_token: str
-
-class Server(BaseModel):
-    id: int
-    name: str
-    description: str
-    owner_id: int
-    invite_code: str
-    created_at: datetime
-
-
-class ServerRoom(BaseModel):
-    id: int
-    type: str
-    server_id: int
-    name: str
-    category_id: Optional[int]
-    position: int
-
-    class Config:
-        from_attributes=True
-
-class ServerMember(BaseModel):
-    user_id: int
-    server_id: int
-    access_level: int
-
-class RoomCategory(BaseModel):
-    id: int
-    name: str
-    server_id: int
-    position: int
-
-
-class ServerCreate(BaseModel):
-    name: str
-    description: str
-    owner_id: int
 
 
 # WebSocket Connections Manager
@@ -256,8 +202,8 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
 # Get user profile picture from the filesystem
 @app.get("/api/images/{image_name}")
 async def serve_image(image_name: str):
-    image_name = unquote(image_name)
     """Endpoint to serve user images."""
+    image_name = unquote(image_name)    # Decode the image name from url
     file_path = os.path.join(IMAGE_DIR, image_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Image not found")
