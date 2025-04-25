@@ -565,7 +565,12 @@ async def delete_room(server_id: int, room_id: int, db: db_dependency):
     db.delete(db_room)
     db.commit()
 
+    # delete from mongoDB aswell
+    collection_name = f"server_{server_id}_room_{room_id}"
+    mongo_db.drop_collection(collection_name)
+
     await websocket_manager.broadcast_server(server_id, "rooms_updated")
+    await websocket_manager.broadcast_textroom(room_id, "room_deleted")
     return f"Room {room_id} has been deleted"
 
 @app.put("/api/server/{server_id}/category/{category_id}/delete", response_model=str)
@@ -821,8 +826,8 @@ async def store_message(message: Message, db: db_dependency) -> MessageResponse:
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid user token")
     
-    # check if user is part of the server or server owner
-    # get server from room ID
+    # Check if user is part of the server or server owner
+    # Get server from room ID
     server = db.query(models.ServerRoom).filter(models.ServerRoom.id == message.room_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -831,7 +836,6 @@ async def store_message(message: Message, db: db_dependency) -> MessageResponse:
     server_owner = db.query(models.Server).filter(models.Server.id == server.id, models.Server.owner_id == db_user.id).first()
     if not server_member and not server_owner:
         raise HTTPException(status_code=409, detail="User is not part of the server")
-    
     
     if db_user.token_expiry < datetime.now():
         raise HTTPException(status_code=400, detail="Token expired")
@@ -846,8 +850,14 @@ async def store_message(message: Message, db: db_dependency) -> MessageResponse:
         "timestamp": datetime.now(),
     }
 
-    # Insert the message into the database
-    result = await mongo_db.messages.insert_one(message_data)
+    # Generate the collection name based on server and room ID
+    collection_name = f"server_{server.id}_room_{message.room_id}"
+
+    # Ensure the collection exists (MongoDB creates it automatically on first insert)
+    collection = mongo_db[collection_name]
+
+    # Insert the message into the specific collection
+    result = await collection.insert_one(message_data)
 
     # Broadcast the new message to the text room
     await websocket_manager.broadcast_textroom(message_data["room_id"], "new_message")
@@ -868,29 +878,38 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency):
     # Verify the user token
     db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
 
-    #get server from room id
-
-    # TODO: FIX CHECKING IF ROOM EXISTS AND ADD SERVERID TO MAKE SURE YOU CANT ACCESS ROOMS FROM OTHER SERVERS
-    server = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
-    if not server:
-        raise HTTPException(status_code=404, detail="Room not found")
-    server_member = db.query(models.ServerMember).filter(models.ServerMember.user_id == db_user.id, models.ServerMember.server_id == server.server_id).first()
-    server_owner = db.query(models.Server).filter(models.Server.id == server.server_id, models.Server.owner_id == db_user.id).first()
-    if not server_member and not server_owner:
-        raise HTTPException(status_code=409, detail="User is not part of the server")
-
-    room = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid token")
 
     if db_user.token_expiry < datetime.now():
         raise HTTPException(status_code=400, detail="Token expired")
 
-    # Retrieve the last 100 messages from MongoDB in descending order
-    messages = await mongo_db.messages.find({"room_id": request.room_id}).sort("timestamp", -1).limit(100).to_list(length=100)
+    # Get the server from the room ID
+    room = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    server = db.query(models.Server).filter(models.Server.id == room.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    # Check if the user is a member of the server or the server owner
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == db_user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    server_owner = db.query(models.Server).filter(
+        models.Server.id == server.id, 
+        models.Server.owner_id == db_user.id
+    ).first()
+    if not server_member and not server_owner:
+        raise HTTPException(status_code=403, detail="User is not part of the server")
+
+    # Generate the collection name based on server and room ID
+    collection_name = f"server_{server.id}_room_{request.room_id}"
+
+    # Retrieve the last 100 messages from the specific collection in MongoDB
+    messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).limit(100).to_list(length=100)
 
     # Reverse the order of the messages
     messages.reverse()
@@ -920,6 +939,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         reload=True,
-        host="0.0.0.0"
+        host="127.0.0.1"
     )
 
