@@ -162,7 +162,7 @@ websocket_manager = WebSocketManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1.nip.io:4200", "https://www.coldra.in"],  # Adjust this to match your frontend's URL
+    allow_origins=["http://lamzaone.go.ro:4200", "https://www.coldra.in"],  # Adjust this to match your frontend's URL
     allow_credentials=True,
     allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers
@@ -275,7 +275,7 @@ def google_auth(token_request: UserIn, db: db_dependency):
         "email": db_user.email,
         "name": db_user.name,
         "nickname": db_user.nickname,
-        "picture": f"http://127.0.0.1.nip.io:8000/api/images/{db_user.picture}",  # Provide URL for frontend
+        "picture": f"http://lamzaone.go.ro:8000/api/images/{db_user.picture}",  # Provide URL for frontend
         "token": db_user.token,
         "refresh_token": db_user.refresh_token
     }
@@ -303,7 +303,7 @@ def refresh_tokens(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://127.0.0.1.nip.io:8000/api/images/{db_user.picture}",
+        picture=f"http://lamzaone.go.ro:8000/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -326,7 +326,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://127.0.0.1.nip.io:8000/api/images/{db_user.picture}",
+        picture=f"http://lamzaone.go.ro:8000/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -347,7 +347,7 @@ async def get_users_info(user_ids: List[int], db: db_dependency): #needs a list 
             email=user.email,
             name=user.name,
             nickname=user.nickname,
-            picture=f"http://127.0.0.1.nip.io:8000/api/images/{user.picture}",
+            picture=f"http://lamzaone.go.ro:8000/api/images/{user.picture}",
             token=user.token,
             refresh_token=user.refresh_token,
         )
@@ -368,7 +368,7 @@ def get_user(user_id: int, db: db_dependency):
         email=db_user.email,
         name=db_user.name,
         nickname=db_user.nickname,
-        picture=f"http://127.0.0.1.nip.io:8000/api/images/{db_user.picture}",
+        picture=f"http://lamzaone.go.ro:8000/api/images/{db_user.picture}",
         token=db_user.token,
         refresh_token=db_user.refresh_token,
     )
@@ -939,6 +939,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         reload=True,
-        host="127.0.0.1"
+        host="0.0.0.0"
     )
 
