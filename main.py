@@ -871,7 +871,7 @@ async def store_message(db: db_dependency,
         dest = os.path.join(UPLOAD_DIR, name)
         with open(dest, "wb") as out:
             out.write(await upload.read())
-        file_urls.append(f"lamzaone.go.ro:8000/uploads/{name}")
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
 
     # Prepare message_data (include attachments URLs)
     message_data = {
