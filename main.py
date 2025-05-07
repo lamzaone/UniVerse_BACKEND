@@ -166,8 +166,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://lamzaone.go.ro:4200"],  # your Angular origin
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],    # allow CORS for all methods
+    allow_headers=["*"],    # allow CORS for all headers
+    expose_headers=["*"],  # allow CORS for all headers
+    # don't allow anything else
 )
 
 MONGO_DATABASE_URL = "mongodb://127.0.0.1:27017"
@@ -799,11 +801,21 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 
 # mount upload folder
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(db: db_dependency, file: UploadFile = File(...)):
+    user_token = file.headers.get("user_token")
+    db_user = db.query(models.User).filter(models.User.token == user_token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid user token")
+    
+    # check file size
+    if file.size > 100 * 1024 * 1024: 
+        raise HTTPException(status_code=400, detail="File too large")
+    
     filename = f"{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, filename)
     with open(file_path, "wb") as f:
