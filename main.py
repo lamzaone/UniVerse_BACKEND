@@ -805,22 +805,23 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
-@app.post("/api/upload")
-async def upload_file(db: db_dependency, file: UploadFile = File(...)):
-    user_token = file.headers.get("user_token")
-    db_user = db.query(models.User).filter(models.User.token == user_token).first()
-    if not db_user:
-        raise HTTPException(status_code=400, detail="Invalid user token")
+# @app.post("/api/upload")
+# async def upload_file(db: db_dependency, file: UploadFile = File(...)):
+#     user_token = file.headers.get("user_token")
+#     db_user = db.query(models.User).filter(models.User.token == user_token).first()
+#     if not db_user:
+#         raise HTTPException(status_code=400, detail="Invalid user token")
     
-    # check file size
-    if file.size > 100 * 1024 * 1024: 
-        raise HTTPException(status_code=400, detail="File too large")
+#     # check file size
+#     if file.size > 100 * 1024 * 1024: 
+#         raise HTTPException(status_code=400, detail="File too large")
     
-    filename = f"{uuid.uuid4()}_{file.filename}"
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    return {"url": f"/uploads/{filename}"}
+#     filename = f"{uuid.uuid4()}_{file.filename}"
+#     print(file.filename)
+#     file_path = os.path.join(UPLOAD_DIR, filename)
+#     with open(file_path, "wb") as f:
+#         f.write(await file.read())
+#     return {"url": f"/uploads/{filename}"}
 
 class Message(BaseModel):
     message: str
@@ -878,8 +879,8 @@ async def store_message(db: db_dependency,
     # Save uploaded files to disk and collect URLs
     file_urls: List[str] = []
     for upload in attachments:
-        ext = upload.filename.split(".")[-1]
-        name = f"{uuid.uuid4().hex}.{ext}"
+        # ext = upload.filename.split(".")[-1]
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
         dest = os.path.join(UPLOAD_DIR, name)
         with open(dest, "wb") as out:
             out.write(await upload.read())
