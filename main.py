@@ -4,7 +4,7 @@ import uuid
 from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Annotated, List, Dict, Optional
+from typing import Annotated, List, Dict, Optional, Set
 from sqlalchemy.orm import Session
 import requests
 from datetime import datetime, timedelta
@@ -55,11 +55,14 @@ def get_db():
 class WebSocketManager:
     def __init__(self):
         self.main_connections: List[WebSocket] = []
-        self.server_connections: Dict[int, List[WebSocket]] = {}  # server_id to list of WebSockets
-        self.textroom_connections: Dict[int, Dict[int, List[WebSocket]]] = {}  # server_id to room_id to list of WebSockets
-        self.connect_audiovideo_connections: Dict[int, List[WebSocket]] = {}  # server_id to room_id to list of WebSockets
+        self.server_connections: Dict[int, List[WebSocket]] = {}
+        self.textroom_connections: Dict[int, List[WebSocket]] = {}
+        self.audiovideo_connections: Dict[int, Dict[int, WebSocket]] = {}  # room_id -> {user_id: WebSocket}
+        self.audiovideo_users_in_room: Dict[int, Set[int]] = {}
 
-    ########### MAIN WEB SOCKET ###########
+
+
+    # --- MAIN SOCKET ---
     async def connect_main(self, websocket: WebSocket):
         await websocket.accept()
         self.main_connections.append(websocket)
@@ -71,7 +74,7 @@ class WebSocketManager:
         for connection in self.main_connections:
             await connection.send_text(message)
 
-    ########### SERVER WEB SOCKET ###########
+    # --- SERVER SOCKET ---
     async def connect_server(self, websocket: WebSocket, server_id: int):
         await websocket.accept()
         if server_id not in self.server_connections:
@@ -87,7 +90,7 @@ class WebSocketManager:
             for connection in self.server_connections[server_id]:
                 await connection.send_text(message)
 
-    ########### TEXT ROOM WEB SOCKET ###########
+    # --- TEXT ROOM SOCKET ---
     async def connect_textroom(self, websocket: WebSocket, room_id: int):
         await websocket.accept()
         if room_id not in self.textroom_connections:
@@ -105,25 +108,37 @@ class WebSocketManager:
             for connection in self.textroom_connections[room_id]:
                 await connection.send_text(message)
 
-    ########### AUDIO/VIDEO ROOM WEB SOCKET ###########
-    async def connect_audiovideo(self, websocket: WebSocket, room_id: int):
+    ########### AUDIO/VIDEO ROOM WEB SOCKET (SIGNALING) ###########
+
+
+    async def connect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
         await websocket.accept()
-        if room_id not in self.connect_audiovideo_connections:
-            self.connect_audiovideo_connections[room_id] = []
-        self.connect_audiovideo_connections[room_id].append(websocket)
+        self.audiovideo_connections.setdefault(room_id, []).append(websocket)
+        self.audiovideo_users_in_room.setdefault(room_id, set()).add(user_id)
 
-    def disconnect_audiovideo(self, websocket: WebSocket, room_id: int):
-        if room_id in self.connect_audiovideo_connections:
-            self.connect_audiovideo_connections[room_id].remove(websocket)
-            if not self.connect_audiovideo_connections[room_id]:
-                del self.connect_audiovideo_connections[room_id]
+    def disconnect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
+        self.audiovideo_connections[room_id].remove(websocket)
+        self.audiovideo_users_in_room[room_id].discard(user_id)
+        if not self.audiovideo_connections[room_id]:
+            del self.audiovideo_connections[room_id]
+        if not self.audiovideo_users_in_room[room_id]:
+            del self.audiovideo_users_in_room[room_id]
 
-    async def broadcast_audiovideo(self, room_id: int, message: str):
+    async def broadcast_audiovideo(self, room_id: int, message: str, exclude_user: int = None):
         if room_id in self.connect_audiovideo_connections:
             for connection in self.connect_audiovideo_connections[room_id]:
-                await connection.send_text(message)
+                if exclude_user is None or connection.user_id != exclude_user:
+                    await connection.send_text(message)
 
-    
+    async def relay_webrtc_signal(self, room_id: int, to_user_id: int, message: dict):
+        try:
+            if room_id in self.connect_audiovideo_connections:
+                user_map = self.connect_audiovideo_connections[room_id]
+                if to_user_id in user_map:
+                    await user_map[to_user_id].send_json(message)
+        except Exception as e:
+            print(f"Relay error: {e}")
+
     async def broadcastConnections(self,update_message:str, user_id: int, servers: List[int], friends: List[int] = None):
         # Broadcast to friends on the main server
         try:
@@ -140,6 +155,7 @@ class WebSocketManager:
         except Exception as e:
             print(f"Error broadcasting connections: {e}")
             pass
+
 
 
 
@@ -323,6 +339,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
     )
     
     return user_response
+
 
 
 @app.post("/api/users/info", response_model = List[User])
@@ -788,18 +805,35 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 
 @app.websocket("/api/ws/audiovideo/{room_id}/{user_id}")
 async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user_id: int):
-    websocket.user_id = user_id
-    """Handle WebSocket connections for a specific audio/video room."""
-    await websocket_manager.connect_textroom(websocket, room_id)
-    # Notify about user joining the audio/video room
-    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined audio/video room {room_id}")
+    await websocket_manager.connect_audiovideo(websocket, room_id, user_id)
+
     try:
         while True:
             data = await websocket.receive_text()
-            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Audio/Video Room {room_id}: {data}")
+            # Assume frontend sends JSON like {"type": "offer", "target": 123, "data": {...}}
+
+            try:
+                message = json.loads(data)
+                message["from"] = user_id
+                message_json = json.dumps(message)
+
+                # Broadcast to all others in the room except sender
+                await websocket_manager.broadcast_audiovideo(room_id, message_json, exclude_user=user_id)
+
+            except Exception as e:
+                print(f"Invalid signaling message: {e}")
+
     except WebSocketDisconnect:
-        websocket_manager.disconnect_textroom(websocket, room_id)
-        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left audio/video room {room_id}")
+        websocket_manager.disconnect_audiovideo(websocket, room_id)
+        await websocket_manager.broadcast_audiovideo(
+            room_id, json.dumps({"type": "user-left", "user_id": user_id}), exclude_user=user_id
+        )
+
+@app.get("/api/room/{room_id}/users")
+def get_users_in_room(room_id: int):
+    users = list(websocket_manager.audiovideo_users_in_room.get(room_id, []))
+    return {"userIds": users}
+
 
 # mount upload folder
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -893,7 +927,7 @@ async def store_message(db: db_dependency,
 
 @app.post("/api/messages/", response_model=List[MessageResponse])
 async def get_messages(request: MessagesRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
-      # Extract token from Authorization header
+    # Extract token from Authorization header
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
