@@ -1,7 +1,7 @@
 import base64
 from urllib.parse import unquote
 import uuid
-from fastapi import FastAPI, File, HTTPException, Depends, Body, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Annotated, List, Dict, Optional
@@ -823,30 +823,6 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 #         f.write(await file.read())
 #     return {"url": f"/uploads/{filename}"}
 
-class Message(BaseModel):
-    message: str
-    user_token: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[int] = None
-    attachments: Optional[List[str]] = None  # List of file URLs or filenames
-
-    class Config:
-        from_attributes = True
-
-class MessageResponse(BaseModel):
-    message: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[int]
-    user_id: int
-    timestamp: datetime
-    attachments: Optional[List[str]] = None
-    _id: str
-
-class MessagesRetrieve(BaseModel):
-    room_id: int
-    user_token: str
 
 from fastapi import Form, File, UploadFile, Depends
 from typing import List, Optional
@@ -914,10 +890,15 @@ async def store_message(db: db_dependency,
     )
 
 @app.post("/api/messages/", response_model=List[MessageResponse])
-async def get_messages(request: MessagesRetrieve, db: db_dependency):
-    # Verify the user token
-    db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
+async def get_messages(request: MessagesRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
+      # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid token")
 
@@ -954,9 +935,9 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency):
     # Reverse the order of the messages
     messages.reverse()
 
-    # Return messages directly with _id from MongoDB
+    # Convert MongoDB _id to string
     for message in messages:
-        message['_id'] = str(message['_id'])  # Ensure _id is returned as a string
+        message['_id'] = str(message['_id'])
 
     return messages
 
