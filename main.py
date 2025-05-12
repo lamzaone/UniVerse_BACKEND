@@ -112,23 +112,41 @@ class WebSocketManager:
 
 
     async def connect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
+
+        websocket.user_id = user_id
         await websocket.accept()
+        # Add the connection even if the user hasn't joined voice
         self.audiovideo_connections.setdefault(room_id, []).append(websocket)
         self.audiovideo_users_in_room.setdefault(room_id, set()).add(user_id)
+
+        # Notify all (including sender) about the user joining (optional: skip if not "connected")
+        await self.broadcast_audiovideo(
+            room_id,
+            json.dumps({"type": "user-joined", "user_id": user_id}),
+        )
 
     def disconnect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
         self.audiovideo_connections[room_id].remove(websocket)
         self.audiovideo_users_in_room[room_id].discard(user_id)
         if not self.audiovideo_connections[room_id]:
             del self.audiovideo_connections[room_id]
-        if not self.audiovideo_users_in_room[room_id]:
             del self.audiovideo_users_in_room[room_id]
 
-    async def broadcast_audiovideo(self, room_id: int, message: str, exclude_user: int = None):
-        if room_id in self.connect_audiovideo_connections:
-            for connection in self.connect_audiovideo_connections[room_id]:
-                if exclude_user is None or connection.user_id != exclude_user:
-                    await connection.send_text(message)
+    async def broadcast_audiovideo(self, room_id: int, message: str):
+        if room_id in self.audiovideo_connections:
+            disconnected = []
+            for ws in self.audiovideo_connections[room_id]:
+                try:
+                    await ws.send_text(message)
+                except RuntimeError:
+                    disconnected.append(ws)
+                except Exception as e:
+                    print(f"Failed to send to websocket: {e}")
+                    disconnected.append(ws)
+
+            for ws in disconnected:
+                self.audiovideo_connections[room_id].remove(ws)
+
 
     async def relay_webrtc_signal(self, room_id: int, to_user_id: int, message: dict):
         try:
@@ -805,29 +823,29 @@ async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_i
 
 @app.websocket("/api/ws/audiovideo/{room_id}/{user_id}")
 async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    # 1) connect → broadcast user-joined to all, including the new user
+    websocket.user_id = user_id
     await websocket_manager.connect_audiovideo(websocket, room_id, user_id)
 
     try:
         while True:
-            data = await websocket.receive_text()
-            # Assume frontend sends JSON like {"type": "offer", "target": 123, "data": {...}}
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            msg["from"] = user_id
+            payload = json.dumps(msg)
 
-            try:
-                message = json.loads(data)
-                message["from"] = user_id
-                message_json = json.dumps(message)
-
-                # Broadcast to all others in the room except sender
-                await websocket_manager.broadcast_audiovideo(room_id, message_json, exclude_user=user_id)
-
-            except Exception as e:
-                print(f"Invalid signaling message: {e}")
+            # 2) signal (offer/answer/candidate) → broadcast to all (you’ll filter client-side if needed)
+            await websocket_manager.broadcast_audiovideo(room_id, payload)
 
     except WebSocketDisconnect:
-        websocket_manager.disconnect_audiovideo(websocket, room_id)
+        # 3) on disconnect → broadcast user-left to everyone
         await websocket_manager.broadcast_audiovideo(
-            room_id, json.dumps({"type": "user-left", "user_id": user_id}), exclude_user=user_id
+            room_id,
+            json.dumps({"type": "user-left", "from": user_id})
         )
+        websocket_manager.disconnect_audiovideo(websocket, room_id, user_id)
+
+
 
 @app.get("/api/room/{room_id}/users")
 def get_users_in_room(room_id: int):
