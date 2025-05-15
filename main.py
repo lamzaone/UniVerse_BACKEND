@@ -494,6 +494,32 @@ def get_server(server_info: GetServer, db: db_dependency):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/server/{server_id}/room/{room_id}", response_model=ServerRoom)
+def get_room(server_id: int, room_id: int, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # extract user from token
+    token = authorization.split(" ")[1] if authorization else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = db_user.id
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not db_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    is_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+    is_owner = db.query(models.Server).filter(
+        models.Server.id == server_id,
+        models.Server.owner_id == user_id
+    ).first()
+
+    
+    return db_room
+
 # Join a server
 class JoinServer(BaseModel):
     invite_code: str
