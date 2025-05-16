@@ -117,7 +117,7 @@ class WebSocketManager:
         await websocket.accept()
         # Add the connection even if the user hasn't joined voice
         self.audiovideo_connections.setdefault(room_id, []).append(websocket)
-        self.audiovideo_users_in_room.setdefault(room_id, set()).add(user_id)
+        self.audiovideo_users_in_room.setdefault(room_id, set())
 
         # Notify all (including sender) about the user joining (optional: skip if not "connected")
         await self.broadcast_audiovideo(
@@ -126,11 +126,14 @@ class WebSocketManager:
         )
 
     def disconnect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
-        self.audiovideo_connections[room_id].remove(websocket)
-        self.audiovideo_users_in_room[room_id].discard(user_id)
-        if not self.audiovideo_connections[room_id]:
-            del self.audiovideo_connections[room_id]
-            del self.audiovideo_users_in_room[room_id]
+        if room_id in self.audiovideo_connections:
+            if websocket in self.audiovideo_connections[room_id]:
+                self.audiovideo_connections[room_id].remove(websocket)
+            if room_id in self.audiovideo_users_in_room:
+                self.audiovideo_users_in_room[room_id].discard(user_id)
+            if not self.audiovideo_connections[room_id]:
+                del self.audiovideo_connections[room_id]
+                del self.audiovideo_users_in_room[room_id]
 
     async def broadcast_audiovideo(self, room_id: int, message: str):
         if room_id in self.audiovideo_connections:
@@ -857,18 +860,19 @@ async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user
         while True:
             raw = await websocket.receive_text()
             msg = json.loads(raw)
-            msg["from"] = user_id
-            payload = json.dumps(msg)
+            payload = msg.get("message")
+            if "joined_call" in payload:
+                websocket_manager.audiovideo_users_in_room[room_id].add(user_id)
+            if "left_call" in payload:
+                websocket_manager.audiovideo_users_in_room[room_id].discard(user_id)
+
 
             # 2) signal (offer/answer/candidate) → broadcast to all (you’ll filter client-side if needed)
             await websocket_manager.broadcast_audiovideo(room_id, payload)
 
     except WebSocketDisconnect:
         # 3) on disconnect → broadcast user-left to everyone
-        await websocket_manager.broadcast_audiovideo(
-            room_id,
-            json.dumps({"type": "user-left", "from": user_id})
-        )
+        await websocket_manager.broadcast_audiovideo(room_id, f"user_left_call:${user_id}")
         websocket_manager.disconnect_audiovideo(websocket, room_id, user_id)
 
 
@@ -1024,6 +1028,13 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency, authorizati
 async def get_users_connected_server(server_id: int, db: db_dependency) -> List[int]:
     connected_users = []
     # Look for all server member ids to see if they are connected to main socket
+    # check if room type is audiovideo
+    server_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id).all()
+    for server_room in server_rooms:
+        if server_room.type == "audio":
+            connected_users.extend(websocket_manager.audiovideo_users_in_room.get(server_room.id, []))
+            return connected_users
+    
     server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
     for server_member in server_members:
         if any(conn.user_id == server_member.user_id for conn in websocket_manager.main_connections):
