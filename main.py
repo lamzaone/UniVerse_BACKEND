@@ -181,9 +181,141 @@ class WebSocketManager:
             print(f"Error broadcasting connections: {e}")
             pass
 
+@app.websocket("/api/ws/main/{user_id}")
+async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dependency):
+    """Handle WebSocket connections for the main server."""
+    websocket.user_id = user_id
+    await websocket_manager.connect_main(websocket)         # Conect to socket
+    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle main server messages or updates
+            await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
+    except WebSocketDisconnect:
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
+        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
+
+    except Exception as e:
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
+        websocket_manager.disconnect_main(websocket)
+
+async def broadcast_status(user_id,status:str, db: db_dependency):
+    servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()       # Get all servers of user
+    servers_owner = db.query(models.Server).filter(models.Server.owner_id == user_id).all()            # Get all servers owned by user
+    servers = [server.server_id for server in servers]                                                 # Get all server ids from memberships
+    servers.extend([server.id for server in servers_owner])                                            # Extend server ids with owned servers
+
+    #TODO: Add friends
+    friends = None
+    await websocket_manager.broadcastConnections(status, user_id, servers, friends)
 
 
+@app.websocket("/api/ws/server/{server_id}/{user_id}")
+async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
+    """Handle WebSocket connections for a specific server."""
+    
+    websocket.user_id = user_id
+    await websocket_manager.connect_server(websocket, server_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle messages related to the server
+            await websocket_manager.broadcast_server(server_id, f"Message from User {user_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_server(websocket, server_id)
+        await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
 
+@app.websocket("/api/ws/textroom/{room_id}/{user_id}")
+async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    
+    websocket.user_id = user_id
+    """Handle WebSocket connections for a specific text room."""
+    await websocket_manager.connect_textroom(websocket, room_id)
+    # Notify about user joining the text room
+    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined text room {room_id}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_textroom(websocket, room_id)
+        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
+
+@app.websocket("/api/ws/audiovideo/{room_id}/{user_id}")
+async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    # 1) connect → broadcast user-joined to all, including the new user
+    websocket.user_id = user_id
+    await websocket_manager.connect_audiovideo(websocket, room_id, user_id)
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            payload = msg.get("message")
+            if "joined_call" in payload:
+                websocket_manager.audiovideo_voice_users[room_id].add(user_id)
+            if "left_call" in payload:
+                websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
+            if "started_sharing_screen" in payload:
+                websocket_manager.audiovideo_sharingscreen_users[room_id].add(user_id)
+            if "stopped_sharing_screen" in payload:
+                websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
+            if "camera_on" in payload:
+                websocket_manager.audiovideo_camera_users[room_id].add(user_id)
+            if "camera_off" in payload:
+                websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
+
+
+            # 2) signal (offer/answer/candidate) → broadcast to all (you’ll filter client-side if needed)
+            await websocket_manager.broadcast_audiovideo(room_id, payload)
+
+    except WebSocketDisconnect:
+        # 3) on disconnect → broadcast user-left to everyone        
+        if user_id in websocket_manager.audiovideo_voice_users[room_id]:
+            websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
+        if user_id in websocket_manager.audiovideo_sharingscreen_users[room_id]:
+            websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
+        if user_id in websocket_manager.audiovideo_camera_users[room_id]:
+            websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
+        await websocket_manager.broadcast_audiovideo(room_id, f"user_left_call:${user_id}")
+
+
+        websocket_manager.disconnect_audiovideo(websocket, room_id, user_id)
+
+async def get_users_connected_server(server_id: int, db: db_dependency) -> List[int]:
+    connected_users = []
+    # Look for all server member ids to see if they are connected to main socket
+    # check if room type is audiovideo
+    server_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id).all()
+    for server_room in server_rooms:
+        if server_room.type == "audio":
+            connected_users.extend(websocket_manager.audiovideo_voice_users.get(server_room.id, []))
+            return connected_users
+    
+    server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    for server_member in server_members:
+        if any(conn.user_id == server_member.user_id for conn in websocket_manager.main_connections):
+            connected_users.append(server_member.user_id)
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    if any(conn.user_id == owner_id for conn in websocket_manager.main_connections):
+        connected_users.append(owner_id)
+
+    return connected_users
+
+@app.get("/api/server/{server_id}/users", response_model=List[int])
+async def get_server_users(server_id: int, db: db_dependency):
+    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    user_ids = [user.user_id for user in server_users]
+    user_ids.append(owner_id)
+    return user_ids
 
 
 
@@ -439,13 +571,6 @@ async def get_online_members(server_id: int, db: db_dependency):
     connected_users = await get_users_connected_server(server_id, db=db)
     return connected_users
 
-@app.get("/api/server/{server_id}/users", response_model=List[int])
-async def get_server_users(server_id: int, db: db_dependency):
-    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
-    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
-    user_ids = [user.user_id for user in server_users]
-    user_ids.append(owner_id)
-    return user_ids
 
 # @app.get("/api/user/friends/", response_model=List[int])
 # async def get_friends(user_id: int, db: db_dependency):
@@ -784,116 +909,6 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
 
     return result
 
-# FastAPI WebSocket management already handles connections for main, server, and text rooms. 
-
-
-@app.websocket("/api/ws/main/{user_id}")
-async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dependency):
-    """Handle WebSocket connections for the main server."""
-    websocket.user_id = user_id
-    await websocket_manager.connect_main(websocket)         # Conect to socket
-    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle main server messages or updates
-            await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
-    except WebSocketDisconnect:
-        try:
-            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
-        except Exception as e:
-            pass
-        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
-
-    except Exception as e:
-        try:
-            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
-        except Exception as e:
-            pass
-        websocket_manager.disconnect_main(websocket)
-
-async def broadcast_status(user_id,status:str, db: db_dependency):
-    servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()       # Get all servers of user
-    servers_owner = db.query(models.Server).filter(models.Server.owner_id == user_id).all()            # Get all servers owned by user
-    servers = [server.server_id for server in servers]                                                 # Get all server ids from memberships
-    servers.extend([server.id for server in servers_owner])                                            # Extend server ids with owned servers
-
-    #TODO: Add friends
-    friends = None
-    await websocket_manager.broadcastConnections(status, user_id, servers, friends)
-
-
-@app.websocket("/api/ws/server/{server_id}/{user_id}")
-async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
-    """Handle WebSocket connections for a specific server."""
-    
-    websocket.user_id = user_id
-    await websocket_manager.connect_server(websocket, server_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle messages related to the server
-            await websocket_manager.broadcast_server(server_id, f"Message from User {user_id}: {data}")
-    except WebSocketDisconnect:
-        websocket_manager.disconnect_server(websocket, server_id)
-        await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
-
-@app.websocket("/api/ws/textroom/{room_id}/{user_id}")
-async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
-    
-    websocket.user_id = user_id
-    """Handle WebSocket connections for a specific text room."""
-    await websocket_manager.connect_textroom(websocket, room_id)
-    # Notify about user joining the text room
-    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined text room {room_id}")
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
-    except WebSocketDisconnect:
-        websocket_manager.disconnect_textroom(websocket, room_id)
-        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
-
-@app.websocket("/api/ws/audiovideo/{room_id}/{user_id}")
-async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user_id: int):
-    # 1) connect → broadcast user-joined to all, including the new user
-    websocket.user_id = user_id
-    await websocket_manager.connect_audiovideo(websocket, room_id, user_id)
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
-            payload = msg.get("message")
-            if "joined_call" in payload:
-                websocket_manager.audiovideo_voice_users[room_id].add(user_id)
-            if "left_call" in payload:
-                websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
-            if "started_sharing_screen" in payload:
-                websocket_manager.audiovideo_sharingscreen_users[room_id].add(user_id)
-            if "stopped_sharing_screen" in payload:
-                websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
-            if "camera_on" in payload:
-                websocket_manager.audiovideo_camera_users[room_id].add(user_id)
-            if "camera_off" in payload:
-                websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
-
-
-            # 2) signal (offer/answer/candidate) → broadcast to all (you’ll filter client-side if needed)
-            await websocket_manager.broadcast_audiovideo(room_id, payload)
-
-    except WebSocketDisconnect:
-        # 3) on disconnect → broadcast user-left to everyone        
-        if user_id in websocket_manager.audiovideo_voice_users[room_id]:
-            websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
-        if user_id in websocket_manager.audiovideo_sharingscreen_users[room_id]:
-            websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
-        if user_id in websocket_manager.audiovideo_camera_users[room_id]:
-            websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
-        await websocket_manager.broadcast_audiovideo(room_id, f"user_left_call:${user_id}")
-
-
-        websocket_manager.disconnect_audiovideo(websocket, room_id, user_id)
 
 
 
@@ -1045,25 +1060,7 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency, authorizati
 
     return messages
 
-async def get_users_connected_server(server_id: int, db: db_dependency) -> List[int]:
-    connected_users = []
-    # Look for all server member ids to see if they are connected to main socket
-    # check if room type is audiovideo
-    server_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id).all()
-    for server_room in server_rooms:
-        if server_room.type == "audio":
-            connected_users.extend(websocket_manager.audiovideo_voice_users.get(server_room.id, []))
-            return connected_users
-    
-    server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
-    for server_member in server_members:
-        if any(conn.user_id == server_member.user_id for conn in websocket_manager.main_connections):
-            connected_users.append(server_member.user_id)
-    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
-    if any(conn.user_id == owner_id for conn in websocket_manager.main_connections):
-        connected_users.append(owner_id)
 
-    return connected_users
 
 
 import uvicorn
