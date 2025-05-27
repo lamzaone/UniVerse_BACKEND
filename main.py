@@ -297,7 +297,7 @@ async def get_users_connected_server(server_id: int, db: db_dependency) -> List[
     for server_room in server_rooms:
         if server_room.type == "audio":
             connected_users.extend(websocket_manager.audiovideo_voice_users.get(server_room.id, []))
-            return connected_users
+            # return connected_users
     
     server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
     for server_member in server_members:
