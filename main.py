@@ -695,13 +695,17 @@ async def join_server(server_info: JoinServer, db: db_dependency):
 
 class CategoryCreateRequest(BaseModel):
     category_name: str
+    category_type: str
 @app.post("/api/server/{server_id}/category/create", response_model=RoomCategory)
 async def create_category(server_id: int, category: CategoryCreateRequest, db: db_dependency):
     category_name = category.category_name
+    category_type = category.category_type
     category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
+
     
     db_category = models.RoomCategory(
         name=category_name,
+        category_type=category_type,
         server_id=server_id,
         position=category_position
     )
@@ -859,6 +863,7 @@ class RoomResponse(BaseModel):
 class CategoryResponse(BaseModel):
     id: Optional[int]
     name: str
+    category_type: str
     position: int
     rooms: List[RoomResponse] = []
 
@@ -891,6 +896,7 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
             'id': category.id,
             'name': category.name,
             'position': category.position,
+            'category_type': category.category_type,
             'rooms': []
         }
         category_rooms = [RoomResponse.model_validate(room) for room in room_map.get(category.id, [])]
@@ -903,6 +909,7 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
     result.append(CategoryResponse(
         id=None, 
         name="Uncategorized", 
+        category_type="Normal",
         position=len(result), 
         rooms=uncategorized_rooms
     ))

@@ -70,6 +70,7 @@ class RoomCategory(Base):
     id = Column(Integer, primary_key=True, index=True)
     server_id = Column(Integer, ForeignKey("server.id"), nullable=False)
     position = Column(Integer)  # For ordering categories
+    category_type = Column(String)  # e.g., "normal", "assignment"
     name = Column(String, nullable=False)
     
     server = relationship("Server", back_populates="categories")

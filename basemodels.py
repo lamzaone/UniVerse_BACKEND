@@ -49,6 +49,7 @@ class ServerMember(BaseModel):
 class RoomCategory(BaseModel):
     id: int
     name: str
+    category_type: str
     server_id: int
     position: int
 
