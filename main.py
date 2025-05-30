@@ -3,7 +3,7 @@ from urllib.parse import unquote
 import uuid
 from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Annotated, List, Dict, Optional, Set
 from sqlalchemy.orm import Session
 import requests
@@ -19,7 +19,6 @@ from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB async client
 from bson import ObjectId
 from basemodels import *
-
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -1074,22 +1073,25 @@ class Assignment(BaseModel):
     user_token: str
     room_id: int
     is_private: bool
-    reply_to: Optional[int] = None
+    reply_to: Optional[str] = None
     attachments: Optional[List[str]] = None  # List of file URLs or filenames
 
     class Config:
         from_attributes = True
 
 class AssignmentResponse(BaseModel):
+    id: str = Field(..., alias="_id")
     message: str
     room_id: int
     is_private: bool
-    reply_to: Optional[int]
+    reply_to: Optional[str] = None
     user_id: int
     timestamp: datetime
     grade: Optional[int] = None
     attachments: Optional[List[str]] = None
-    _id: str
+
+    class Config:
+        allow_population_by_field_name = True
 
 class AssignmentsRetrieve(BaseModel):
     room_id: int
@@ -1102,7 +1104,7 @@ async def store_message(db: db_dependency,
     user_token: str = Form(...),
     room_id: int = Form(...),
     is_private: bool = Form(...),
-    reply_to: Optional[int] = Form(None),
+    reply_to: Optional[str] = Form(None),
     attachments: List[UploadFile] = File(default=[]),      # <— accept files here
 ) -> AssignmentResponse:
     # Get user from token
@@ -1151,7 +1153,7 @@ async def store_message(db: db_dependency,
     collection = mongo_db[f"server_{server.id}_assignments_{room_id}"]
     result = await collection.insert_one(message_data)
 
-    return MessageResponse(
+    return AssignmentResponse(
         message=message_data["message"],
         room_id=message_data["room_id"],
         is_private=message_data["is_private"],
@@ -1163,7 +1165,7 @@ async def store_message(db: db_dependency,
         attachments=message_data["attachments"],
     )
 
-@app.post("/api/assignments/", response_model=List[MessageResponse])
+@app.post("/api/assignments/", response_model=List[AssignmentResponse])
 async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
     # Extract token from Authorization header
     if not authorization or not authorization.startswith("Bearer "):
@@ -1213,24 +1215,18 @@ async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authoriz
         # Add messages from server owner or users with access_level > 0 that don't have a "reply_to" field
         messages.extend(
             await mongo_db[collection_name].find({
-            "reply_to": {"$exists": False},
-            "$or": [
-                {"user_id": server.owner_id},
-                {"user_id": {"$in": [member.user_id for member in db.query(models.ServerMember).filter(models.ServerMember.server_id == server.id, models.ServerMember.access_level > 0).all()]}}
-            ]
-            }).sort("timestamp", -1).to_list(length=1000)
-        )
-        # Add messages from the server owner
-        messages.extend(
-            await mongo_db[collection_name].find({
-            "user_id": server.owner_id
+                "reply_to": "0",
+                "$or": [              
+                    {"reply_to": {"$in": [msg["_id"] for msg in messages if msg["user_id"] == db_user.id]}},
+                    {"user_id": server.owner_id},
+                    {"user_id": {"$in": [member.user_id for member in db.query(models.ServerMember).filter(models.ServerMember.server_id == server.id, models.ServerMember.access_level > 0).all()]}}
+                ]
             }).sort("timestamp", -1).to_list(length=1000)
         )
 
     # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
     messages.reverse()
 
-    # Convert MongoDB _id to string
     for message in messages:
         message['_id'] = str(message['_id'])
 
