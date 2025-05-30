@@ -59,7 +59,7 @@ class ServerMember(Base):
 
     user_id = Column(Integer, ForeignKey("user.id"), primary_key=True)
     server_id = Column(Integer, ForeignKey("server.id"), primary_key=True)
-    access_level = Column(Integer)
+    access_level = Column(Integer, default=0)
     user = relationship("User", back_populates="memberships")
     server = relationship("Server", back_populates="members")
 

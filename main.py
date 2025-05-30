@@ -1068,6 +1068,173 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency, authorizati
     return messages
 
 
+###################### ASSIGNMENTS ######################
+class Assignment(BaseModel):
+    message: str
+    user_token: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[int] = None
+    attachments: Optional[List[str]] = None  # List of file URLs or filenames
+
+    class Config:
+        from_attributes = True
+
+class AssignmentResponse(BaseModel):
+    message: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[int]
+    user_id: int
+    timestamp: datetime
+    grade: Optional[int] = None
+    attachments: Optional[List[str]] = None
+    _id: str
+
+class AssignmentsRetrieve(BaseModel):
+    room_id: int
+    user_token: str
+
+
+@app.post("/api/assignment", response_model=AssignmentResponse)
+async def store_message(db: db_dependency,
+    message: str = Form(...),
+    user_token: str = Form(...),
+    room_id: int = Form(...),
+    is_private: bool = Form(...),
+    reply_to: Optional[int] = Form(None),
+    attachments: List[UploadFile] = File(default=[]),      # <— accept files here
+) -> AssignmentResponse:
+    # Get user from token
+    db_user = db.query(models.User).filter(models.User.token == user_token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid user token")
+
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Check room & membership (unchanged)…
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    # if datetime(server_room.name.split(" ")[1]) < datetime.now():
+    #     raise HTTPException(status_code=400, detail="Assignment expired")
+    # if timedelta(days=1) < datetime.now() - datetime(server_room.name.split(" ")[2]):
+    #     raise HTTPException(status_code=400, detail="Assignment expired")
+
+    server = db.query(models.Server).filter(models.Server.id == server_room.server_id).first()
+    # …membership checks as before…
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        # ext = upload.filename.split(".")[-1]
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Prepare message_data (include attachments URLs)
+    message_data = {
+        "message": message,
+        "user_id": db_user.id,
+        "room_id": room_id,
+        "is_private": is_private,
+        "reply_to": reply_to,
+        "attachments": file_urls,
+        "grade": None,  # Assignments start with no grade
+        "timestamp": datetime.now(),
+    }
+
+    # Insert into Mongo, broadcast, and return (unchanged)…
+    collection = mongo_db[f"server_{server.id}_assignments_{room_id}"]
+    result = await collection.insert_one(message_data)
+
+    return MessageResponse(
+        message=message_data["message"],
+        room_id=message_data["room_id"],
+        is_private=message_data["is_private"],
+        reply_to=message_data["reply_to"],
+        user_id=message_data["user_id"],
+        timestamp=message_data["timestamp"],
+        grade=message_data["grade"],
+        _id=str(result.inserted_id),
+        attachments=message_data["attachments"],
+    )
+
+@app.post("/api/assignments/", response_model=List[MessageResponse])
+async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Get the server from the room ID
+    room = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    server = db.query(models.Server).filter(models.Server.id == room.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    # Check if the user is a member of the server or the server owner
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == db_user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    server_owner = db.query(models.Server).filter(
+        models.Server.id == server.id, 
+        models.Server.owner_id == db_user.id
+    ).first()
+    if not server_member and not server_owner:
+        raise HTTPException(status_code=403, detail="User is not part of the server")
+
+    # Generate the collection name based on server and room ID
+    collection_name = f"server_{server.id}_assignments_{request.room_id}"
+
+    # Retrieve the last 100 messages from the specific collection in MongoDB
+    # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).limit(100).to_list(length=100)
+    #check if db_user is server owner or level 2
+    if server_owner or (server_member and server_member.access_level > 0):
+        messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
+    else:
+        messages = await mongo_db[collection_name].find({"user_id": db_user.id}).sort("timestamp", -1).to_list(length=1000)
+        # Add messages from server owner or users with access_level > 0 that don't have a "reply_to" field
+        messages.extend(
+            await mongo_db[collection_name].find({
+            "reply_to": {"$exists": False},
+            "$or": [
+                {"user_id": server.owner_id},
+                {"user_id": {"$in": [member.user_id for member in db.query(models.ServerMember).filter(models.ServerMember.server_id == server.id, models.ServerMember.access_level > 0).all()]}}
+            ]
+            }).sort("timestamp", -1).to_list(length=1000)
+        )
+        # Add messages from the server owner
+        messages.extend(
+            await mongo_db[collection_name].find({
+            "user_id": server.owner_id
+            }).sort("timestamp", -1).to_list(length=1000)
+        )
+
+    # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
+    messages.reverse()
+
+    # Convert MongoDB _id to string
+    for message in messages:
+        message['_id'] = str(message['_id'])
+
+    return messages
 
 
 import uvicorn
