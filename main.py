@@ -1068,34 +1068,6 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency, authorizati
 
 
 ###################### ASSIGNMENTS ######################
-class Assignment(BaseModel):
-    message: str
-    user_token: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[str] = None
-    attachments: Optional[List[str]] = None  # List of file URLs or filenames
-
-    class Config:
-        from_attributes = True
-
-class AssignmentResponse(BaseModel):
-    id: str = Field(..., alias="_id")
-    message: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[str] = None
-    user_id: int
-    timestamp: datetime
-    grade: Optional[int] = None
-    attachments: Optional[List[str]] = None
-
-    class Config:
-        allow_population_by_field_name = True
-
-class AssignmentsRetrieve(BaseModel):
-    room_id: int
-    user_token: str
 
 
 @app.post("/api/assignment", response_model=AssignmentResponse)
