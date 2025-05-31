@@ -1185,19 +1185,37 @@ async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authoriz
     else:
         messages = await mongo_db[collection_name].find({"user_id": db_user.id}).sort("timestamp", -1).to_list(length=1000)
         # Add messages from server owner or users with access_level > 0 that don't have a "reply_to" field
+        elevated_user_ids = [
+            member.user_id for member in db.query(models.ServerMember)
+            .filter(
+                models.ServerMember.server_id == server.id,
+                models.ServerMember.access_level > 0
+            ).all()
+        ]
+
+        user_message_ids = [str(msg["_id"]) for msg in messages if msg["user_id"] == db_user.id]
+
         messages.extend(
             await mongo_db[collection_name].find({
-                "reply_to": "0",
-                "$or": [              
-                    {"reply_to": {"$in": [msg["_id"] for msg in messages if msg["user_id"] == db_user.id]}},
-                    {"user_id": server.owner_id},
-                    {"user_id": {"$in": [member.user_id for member in db.query(models.ServerMember).filter(models.ServerMember.server_id == server.id, models.ServerMember.access_level > 0).all()]}}
+                "$and": [
+                    {
+                        "user_id": {
+                            "$in": [server.owner_id] + elevated_user_ids
+                        }
+                    },
+                    {
+                        "$or": [
+                            {"reply_to": "0"},
+                            {"reply_to": {"$in": user_message_ids}}
+                        ]
+                    }
                 ]
             }).sort("timestamp", -1).to_list(length=1000)
         )
 
+
     # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
-    messages.reverse()
+    messages = sorted(messages, key=lambda msg: msg["timestamp"])
 
     for message in messages:
         message['_id'] = str(message['_id'])
