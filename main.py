@@ -1125,6 +1125,9 @@ async def store_message(db: db_dependency,
     collection = mongo_db[f"server_{server.id}_assignments_{room_id}"]
     result = await collection.insert_one(message_data)
 
+    
+    await websocket_manager.broadcast_textroom(room_id, "new_message")
+
     return AssignmentResponse(
         message=message_data["message"],
         room_id=message_data["room_id"],
