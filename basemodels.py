@@ -109,7 +109,7 @@ class AssignmentResponse(BaseModel):
     reply_to: Optional[str] = None
     user_id: int
     timestamp: datetime
-    grade: Optional[int] = None
+    grade: Optional[float] = None
     attachments: Optional[List[str]] = None
 
     class Config:

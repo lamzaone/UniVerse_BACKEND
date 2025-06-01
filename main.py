@@ -1224,6 +1224,71 @@ async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authoriz
         message['_id'] = str(message['_id'])
 
     return messages
+class GradeAssignment(BaseModel):
+    assignment_id: str
+    room_id: int
+    grade: float
+
+@app.put("/api/assignment/grade", response_model=AssignmentResponse)
+async def grade_assignment(grade_assignment: GradeAssignment, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.replace("Bearer ", "")
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    # Check if the user is a server owner or has access level > 0
+    # Get the server from the room ID
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == grade_assignment.room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    server = db.query(models.Server).filter(models.Server.id == server_room.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    # Check if the user is a server member with access level > 0 or the server owner
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == db_user.id,
+        models.ServerMember.server_id == server.id,
+        models.ServerMember.access_level > 0
+    ).first()
+
+    if not server_member and server.owner_id != db_user.id:
+        raise HTTPException(status_code=403, detail="User is not authorized to grade assignments")
+    # Get the assignment from MongoDB
+    collection_name = f"server_{server.id}_assignments_{grade_assignment.room_id}"
+    assignment = await mongo_db[collection_name].find_one({"_id": ObjectId(grade_assignment.assignment_id)})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    # Update the assignment grade
+    assignment["grade"] = grade_assignment.grade
+    await mongo_db[collection_name].update_one(
+        {"_id": ObjectId(grade_assignment.assignment_id)},
+        {"$set": {"grade": grade_assignment.grade}}
+    )
+    # Convert the assignment to the response model
+    assignment_response = AssignmentResponse(
+        id=grade_assignment.assignment_id,
+        message=assignment["message"],
+        room_id=grade_assignment.room_id,
+        is_private=assignment["is_private"],
+        reply_to=assignment["reply_to"],
+        user_id=assignment["user_id"],
+        timestamp=assignment["timestamp"],
+        grade=assignment["grade"],
+        attachments=assignment.get("attachments", [])
+    )
+    # Broadcast the updated assignment to the room
+    await websocket_manager.broadcast_textroom(grade_assignment.room_id, "assignment_graded")
+    return assignment_response
+    
+
+
 
 
 import uvicorn
