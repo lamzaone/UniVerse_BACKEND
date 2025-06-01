@@ -959,7 +959,7 @@ async def store_message(db: db_dependency,
     user_token: str = Form(...),
     room_id: int = Form(...),
     is_private: bool = Form(...),
-    reply_to: Optional[int] = Form(None),
+    reply_to: Optional[str] = Form(None),
     attachments: List[UploadFile] = File(default=[]),      # <— accept files here
 ) -> MessageResponse:
     # Get user from token

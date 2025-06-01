@@ -71,15 +71,18 @@ class Message(BaseModel):
         from_attributes = True
 
 # TODO: fix like in AssignmentResponse
-class MessageResponse(BaseModel):
+class MessageResponse(BaseModel):    
+    id: str = Field(..., alias="_id")
     message: str
     room_id: int
     is_private: bool
-    reply_to: Optional[int]
+    reply_to: Optional[str] = None
     user_id: int
     timestamp: datetime
     attachments: Optional[List[str]] = None
-    _id: str
+
+    class Config:
+        populate_by_name = True
 
 class MessagesRetrieve(BaseModel):
     room_id: int
