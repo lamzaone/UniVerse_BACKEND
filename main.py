@@ -1066,6 +1066,76 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency, authorizati
 
     return messages
 
+@app.put("/api/message/edit", response_model=MessageResponse)
+async def edit_message(
+    db: db_dependency,
+    message_id: str = Form(...),
+    room_id: int = Form(...),
+    message: str = Form(...),
+    attachments: List[UploadFile] = File(default=[]),  # Accept files here
+    Authorization: Optional[str] = Header(None),
+):
+    # Extract token from Authorization header
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    # Get the message from MongoDB
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    collection_name = f"server_{server_room.server_id}_room_{server_room.id}"
+    collection = mongo_db[collection_name]
+    message_data = await collection.find_one({"_id": ObjectId(message_id)})
+
+    # check if user can edit the message
+    if db_user.id != message_data["user_id"]:
+        raise HTTPException(status_code=403, detail="User not authorized to edit this message")
+
+    if not message_data:
+        raise HTTPException(status_code=404, detail="Message not found")
+    # Check if the user is authorized to edit the message
+    db_user = db.query(models.User).filter(models.User.id == message_data["user_id"]).first()
+
+    # Update the message content
+    message_data["message"] = message
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Add attachments URLs to the message data
+    message_data["attachments"].extend(file_urls)
+
+    # Update the message in MongoDB
+    await collection.update_one({"_id": ObjectId(message_id)}, {"$set": message_data})
+
+    # Broadcast the updated message
+    room_id = message_data["room_id"]
+    await websocket_manager.broadcast_textroom(room_id, "message_updated")
+
+    return MessageResponse(
+        message=message_data["message"],
+        room_id=message_data["room_id"],
+        is_private=message_data["is_private"],
+        reply_to=message_data.get("reply_to"),
+        user_id=message_data["user_id"],
+        timestamp=message_data["timestamp"],
+        _id=str(message_data["_id"]),
+        attachments=message_data["attachments"],
+    )
+
 
 ###################### ASSIGNMENTS ######################
 
@@ -1286,7 +1356,71 @@ async def grade_assignment(grade_assignment: GradeAssignment, db: db_dependency,
     # Broadcast the updated assignment to the room
     await websocket_manager.broadcast_textroom(grade_assignment.room_id, "assignment_graded")
     return assignment_response
-    
+
+@app.put("/api/assignment/edit", response_model=AssignmentResponse)
+async def edit_assignment(
+    db: db_dependency,
+    assignment_id: str = Form(...),
+    room_id: int = Form(...),
+    message: str = Form(...),
+    attachments: List[UploadFile] = File(default=[]),
+    authorization: Optional[str] = Header(None)
+):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Retrieve the server ID from the room
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    collection_name = f"server_{server_room.server_id}_assignments_{room_id}"
+    assignment = await mongo_db[collection_name].find_one({"_id": ObjectId(assignment_id)})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if assignment["user_id"] != db_user.id:
+        raise HTTPException(status_code=403, detail="You are not authorized to edit this assignment")
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Update the assignment message and attachments
+    await mongo_db[collection_name].update_one(
+        {"_id": ObjectId(assignment_id)},
+        {"$set": {"message": message, "attachments": file_urls}}
+    )
+
+    # Prepare the response
+    assignment_response = AssignmentResponse(
+        _id=str(assignment_id),
+        message=message,
+        room_id=room_id,
+        is_private=assignment["is_private"],
+        reply_to=assignment["reply_to"],
+        user_id=assignment["user_id"],
+        timestamp=assignment["timestamp"],
+        grade=assignment.get("grade", None),
+        attachments=file_urls
+    )
+
+    # Broadcast the updated assignment to the room
+    await websocket_manager.broadcast_textroom(room_id, "assignment_edited")
+    return assignment_response
+
 
 
 
