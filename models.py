@@ -59,9 +59,11 @@ class ServerMember(Base):
 
     user_id = Column(Integer, ForeignKey("user.id"), primary_key=True)
     server_id = Column(Integer, ForeignKey("server.id"), primary_key=True)
-    access_level = Column(Integer)
+    access_level = Column(Integer, default=0)
     user = relationship("User", back_populates="memberships")
     server = relationship("Server", back_populates="members")
+    grades = Column(String, default="")  # Store grades as JSON
+    attendances = Column(String, default="")  # Store attendance as a JSON string or similar format
 
 # Room Category Model
 class RoomCategory(Base):
@@ -70,6 +72,7 @@ class RoomCategory(Base):
     id = Column(Integer, primary_key=True, index=True)
     server_id = Column(Integer, ForeignKey("server.id"), nullable=False)
     position = Column(Integer)  # For ordering categories
+    category_type = Column(String)  # e.g., "normal", "assignment"
     name = Column(String, nullable=False)
     
     server = relationship("Server", back_populates="categories")

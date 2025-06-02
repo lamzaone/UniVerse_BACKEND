@@ -1,10 +1,10 @@
 import base64
 from urllib.parse import unquote
 import uuid
-from fastapi import FastAPI, File, HTTPException, Depends, Body, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import Annotated, List, Dict, Optional
+from pydantic import BaseModel, Field
+from typing import Annotated, List, Dict, Optional, Set
 from sqlalchemy.orm import Session
 import requests
 from datetime import datetime, timedelta
@@ -19,7 +19,6 @@ from fastapi.responses import FileResponse
 from motor.motor_asyncio import AsyncIOMotorClient  # MongoDB async client
 from bson import ObjectId
 from basemodels import *
-
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -55,10 +54,16 @@ def get_db():
 class WebSocketManager:
     def __init__(self):
         self.main_connections: List[WebSocket] = []
-        self.server_connections: Dict[int, List[WebSocket]] = {}  # server_id to list of WebSockets
-        self.textroom_connections: Dict[int, Dict[int, List[WebSocket]]] = {}  # server_id to room_id to list of WebSockets
+        self.server_connections: Dict[int, List[WebSocket]] = {}
+        self.textroom_connections: Dict[int, List[WebSocket]] = {}
+        self.audiovideo_connections: Dict[int, Dict[int, WebSocket]] = {}  # room_id -> {user_id: WebSocket}
+        self.audiovideo_voice_users: Dict[int, Set[int]] = {}
+        self.audiovideo_sharingscreen_users: Dict[int, Set[int]] = {}
+        self.audiovideo_camera_users: Dict[int, Set[int]] = {}
 
-    # Handle connections for the main server
+
+
+    # --- MAIN SOCKET ---
     async def connect_main(self, websocket: WebSocket):
         await websocket.accept()
         self.main_connections.append(websocket)
@@ -70,7 +75,7 @@ class WebSocketManager:
         for connection in self.main_connections:
             await connection.send_text(message)
 
-    # Handle connections for specific servers
+    # --- SERVER SOCKET ---
     async def connect_server(self, websocket: WebSocket, server_id: int):
         await websocket.accept()
         if server_id not in self.server_connections:
@@ -86,7 +91,7 @@ class WebSocketManager:
             for connection in self.server_connections[server_id]:
                 await connection.send_text(message)
 
-    # Handle connections for text rooms
+    # --- TEXT ROOM SOCKET ---
     async def connect_textroom(self, websocket: WebSocket, room_id: int):
         await websocket.accept()
         if room_id not in self.textroom_connections:
@@ -104,39 +109,60 @@ class WebSocketManager:
             for connection in self.textroom_connections[room_id]:
                 await connection.send_text(message)
 
-    # async def broadcastConnections(self, update_message: str, user_id: int, servers: List[int], friends: List[int] = None):
-    #     # Broadcast to friends on the main server
-    #     if friends:
-    #         for connection in self.main_connections:
-    #             if connection.user_id in friends:
-    #                 try:
-    #                     await connection.send_text(f"{user_id}: {update_message}")
-    #                 except WebSocketDisconnect:
-    #                     # Log and remove disconnected connection
-    #                     print(f"Friend {connection.user_id} disconnected")
-    #                     self.main_connections.remove(connection)
-    #                 except Exception as e:
-    #                     # Catch other exceptions
-    #                     print(f"Error sending message to friend {connection.user_id}: {e}")
+    ########### AUDIO/VIDEO ROOM WEB SOCKET (SIGNALING) ###########
 
-    #     # Broadcast to users in the same servers
-    #     for server_id in servers:
-    #         try:
-    #             if server_id in self.server_connections:
-    #                 for connection in self.server_connections[server_id]:
-    #                     try:
-    #                         await connection.send_text(f"{user_id}: {update_message}")
-    #                     except WebSocketDisconnect:
-    #                         # Log and remove disconnected connection
-    #                         print(f"User {connection.user_id} in server {server_id} disconnected")
-    #                         self.server_connections[server_id].remove(connection)
-    #                     except Exception as e:
-    #                         # Catch other exceptions
-    #                         print(f"Error sending message to server {server_id}, user {connection.user_id}: {e}")
-    #         except Exception as e:
-    #             print(f"Error processing server {server_id}: {e}")
 
-    
+    async def connect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
+
+        websocket.user_id = user_id
+        await websocket.accept()
+        # Add the connection even if the user hasn't joined voice
+        self.audiovideo_connections.setdefault(room_id, []).append(websocket)
+        self.audiovideo_voice_users.setdefault(room_id, set())
+        self.audiovideo_camera_users.setdefault(room_id, set())
+        self.audiovideo_sharingscreen_users.setdefault(room_id, set())
+
+        # Notify all (including sender) about the user joining (optional: skip if not "connected")
+        await self.broadcast_audiovideo(
+            room_id,
+            json.dumps({"type": "user-joined", "user_id": user_id}),
+        )
+
+    def disconnect_audiovideo(self, websocket: WebSocket, room_id: int, user_id: int):
+        if room_id in self.audiovideo_connections:
+            if websocket in self.audiovideo_connections[room_id]:
+                self.audiovideo_connections[room_id].remove(websocket)
+            if room_id in self.audiovideo_voice_users:
+                self.audiovideo_voice_users[room_id].discard(user_id)
+            if not self.audiovideo_connections[room_id]:
+                del self.audiovideo_connections[room_id]
+                del self.audiovideo_voice_users[room_id]
+
+    async def broadcast_audiovideo(self, room_id: int, message: str):
+        if room_id in self.audiovideo_connections:
+            disconnected = []
+            for ws in self.audiovideo_connections[room_id]:
+                try:
+                    await ws.send_text(message)
+                except RuntimeError:
+                    disconnected.append(ws)
+                except Exception as e:
+                    print(f"Failed to send to websocket: {e}")
+                    disconnected.append(ws)
+
+            for ws in disconnected:
+                self.audiovideo_connections[room_id].remove(ws)
+
+
+    async def relay_webrtc_signal(self, room_id: int, to_user_id: int, message: dict):
+        try:
+            if room_id in self.connect_audiovideo_connections:
+                user_map = self.connect_audiovideo_connections[room_id]
+                if to_user_id in user_map:
+                    await user_map[to_user_id].send_json(message)
+        except Exception as e:
+            print(f"Relay error: {e}")
+
     async def broadcastConnections(self,update_message:str, user_id: int, servers: List[int], friends: List[int] = None):
         # Broadcast to friends on the main server
         try:
@@ -154,8 +180,141 @@ class WebSocketManager:
             print(f"Error broadcasting connections: {e}")
             pass
 
+@app.websocket("/api/ws/main/{user_id}")
+async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dependency):
+    """Handle WebSocket connections for the main server."""
+    websocket.user_id = user_id
+    await websocket_manager.connect_main(websocket)         # Conect to socket
+    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle main server messages or updates
+            await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
+    except WebSocketDisconnect:
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
+        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
+
+    except Exception as e:
+        try:
+            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
+        except Exception as e:
+            pass
+        websocket_manager.disconnect_main(websocket)
+
+async def broadcast_status(user_id,status:str, db: db_dependency):
+    servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()       # Get all servers of user
+    servers_owner = db.query(models.Server).filter(models.Server.owner_id == user_id).all()            # Get all servers owned by user
+    servers = [server.server_id for server in servers]                                                 # Get all server ids from memberships
+    servers.extend([server.id for server in servers_owner])                                            # Extend server ids with owned servers
+
+    #TODO: Add friends
+    friends = None
+    await websocket_manager.broadcastConnections(status, user_id, servers, friends)
 
 
+@app.websocket("/api/ws/server/{server_id}/{user_id}")
+async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
+    """Handle WebSocket connections for a specific server."""
+    
+    websocket.user_id = user_id
+    await websocket_manager.connect_server(websocket, server_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle messages related to the server
+            await websocket_manager.broadcast_server(server_id, f"Message from User {user_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_server(websocket, server_id)
+        await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
+
+@app.websocket("/api/ws/textroom/{room_id}/{user_id}")
+async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    
+    websocket.user_id = user_id
+    """Handle WebSocket connections for a specific text room."""
+    await websocket_manager.connect_textroom(websocket, room_id)
+    # Notify about user joining the text room
+    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined text room {room_id}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
+    except WebSocketDisconnect:
+        websocket_manager.disconnect_textroom(websocket, room_id)
+        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
+
+@app.websocket("/api/ws/audiovideo/{room_id}/{user_id}")
+async def websocket_audiovideo_endpoint(websocket: WebSocket, room_id: int, user_id: int):
+    # 1) connect → broadcast user-joined to all, including the new user
+    websocket.user_id = user_id
+    await websocket_manager.connect_audiovideo(websocket, room_id, user_id)
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+            payload = msg.get("message")
+            if "joined_call" in payload:
+                websocket_manager.audiovideo_voice_users[room_id].add(user_id)
+            if "left_call" in payload:
+                websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
+            if "started_sharing_screen" in payload:
+                websocket_manager.audiovideo_sharingscreen_users[room_id].add(user_id)
+            if "stopped_sharing_screen" in payload:
+                websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
+            if "camera_on" in payload:
+                websocket_manager.audiovideo_camera_users[room_id].add(user_id)
+            if "camera_off" in payload:
+                websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
+
+
+            # 2) signal (offer/answer/candidate) → broadcast to all (you’ll filter client-side if needed)
+            await websocket_manager.broadcast_audiovideo(room_id, payload)
+
+    except WebSocketDisconnect:
+        # 3) on disconnect → broadcast user-left to everyone        
+        if user_id in websocket_manager.audiovideo_voice_users[room_id]:
+            websocket_manager.audiovideo_voice_users[room_id].discard(user_id)
+        if user_id in websocket_manager.audiovideo_sharingscreen_users[room_id]:
+            websocket_manager.audiovideo_sharingscreen_users[room_id].discard(user_id)
+        if user_id in websocket_manager.audiovideo_camera_users[room_id]:
+            websocket_manager.audiovideo_camera_users[room_id].discard(user_id)
+        await websocket_manager.broadcast_audiovideo(room_id, f"user_left_call:${user_id}")
+
+
+        websocket_manager.disconnect_audiovideo(websocket, room_id, user_id)
+
+async def get_users_connected_server(server_id: int, db: db_dependency) -> List[int]:
+    connected_users = []
+    # Look for all server member ids to see if they are connected to main socket
+    # check if room type is audiovideo
+    server_rooms = db.query(models.ServerRoom).filter(models.ServerRoom.server_id == server_id).all()
+    for server_room in server_rooms:
+        if server_room.type == "audio":
+            connected_users.extend(websocket_manager.audiovideo_voice_users.get(server_room.id, []))
+            # return connected_users
+    
+    server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    for server_member in server_members:
+        if any(conn.user_id == server_member.user_id for conn in websocket_manager.main_connections):
+            connected_users.append(server_member.user_id)
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    if any(conn.user_id == owner_id for conn in websocket_manager.main_connections):
+        connected_users.append(owner_id)
+
+    return connected_users
+
+@app.get("/api/server/{server_id}/users", response_model=List[int])
+async def get_server_users(server_id: int, db: db_dependency):
+    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
+    user_ids = [user.user_id for user in server_users]
+    user_ids.append(owner_id)
+    return user_ids
 
 
 
@@ -338,6 +497,7 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
     return user_response
 
 
+
 @app.post("/api/users/info", response_model = List[User])
 async def get_users_info(user_ids: List[int], db: db_dependency): #needs a list of user ids, can be used for single ID as well
     users = await db.query(User).filter(User.id.in_(user_ids)).all()
@@ -410,13 +570,6 @@ async def get_online_members(server_id: int, db: db_dependency):
     connected_users = await get_users_connected_server(server_id, db=db)
     return connected_users
 
-@app.get("/api/server/{server_id}/users", response_model=List[int])
-async def get_server_users(server_id: int, db: db_dependency):
-    server_users = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
-    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
-    user_ids = [user.user_id for user in server_users]
-    user_ids.append(owner_id)
-    return user_ids
 
 # @app.get("/api/user/friends/", response_model=List[int])
 # async def get_friends(user_id: int, db: db_dependency):
@@ -472,6 +625,32 @@ def get_server(server_info: GetServer, db: db_dependency):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/api/server/{server_id}/room/{room_id}", response_model=ServerRoom)
+def get_room(server_id: int, room_id: int, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # extract user from token
+    token = authorization.split(" ")[1] if authorization else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = db_user.id
+    db_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not db_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    is_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+    is_owner = db.query(models.Server).filter(
+        models.Server.id == server_id,
+        models.Server.owner_id == user_id
+    ).first()
+
+    
+    return db_room
+
 # Join a server
 class JoinServer(BaseModel):
     invite_code: str
@@ -515,13 +694,17 @@ async def join_server(server_info: JoinServer, db: db_dependency):
 
 class CategoryCreateRequest(BaseModel):
     category_name: str
+    category_type: str
 @app.post("/api/server/{server_id}/category/create", response_model=RoomCategory)
 async def create_category(server_id: int, category: CategoryCreateRequest, db: db_dependency):
     category_name = category.category_name
+    category_type = category.category_type
     category_position = db.query(models.RoomCategory).filter(models.RoomCategory.server_id == server_id).count()
+
     
     db_category = models.RoomCategory(
         name=category_name,
+        category_type=category_type,
         server_id=server_id,
         position=category_position
     )
@@ -679,6 +862,7 @@ class RoomResponse(BaseModel):
 class CategoryResponse(BaseModel):
     id: Optional[int]
     name: str
+    category_type: str
     position: int
     rooms: List[RoomResponse] = []
 
@@ -711,6 +895,7 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
             'id': category.id,
             'name': category.name,
             'position': category.position,
+            'category_type': category.category_type,
             'rooms': []
         }
         category_rooms = [RoomResponse.model_validate(room) for room in room_map.get(category.id, [])]
@@ -723,81 +908,21 @@ def get_categories_and_rooms(server_id: int, db: Session = Depends(get_db)):
     result.append(CategoryResponse(
         id=None, 
         name="Uncategorized", 
+        category_type="Normal",
         position=len(result), 
         rooms=uncategorized_rooms
     ))
 
     return result
 
-# FastAPI WebSocket management already handles connections for main, server, and text rooms. 
 
 
-@app.websocket("/api/ws/main/{user_id}")
-async def websocket_main_endpoint(websocket: WebSocket, user_id: int, db: db_dependency):
-    """Handle WebSocket connections for the main server."""
-    websocket.user_id = user_id
-    await websocket_manager.connect_main(websocket)         # Conect to socket
-    await broadcast_status(user_id,"online", db)            # Broadcast status to all servers
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle main server messages or updates
-            await websocket_manager.broadcast_main(f"Main Server Update for User {user_id}: {data}")
-    except WebSocketDisconnect:
-        try:
-            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
-        except Exception as e:
-            pass
-        websocket_manager.disconnect_main(websocket)        # Disconnect from socket
 
-    except Exception as e:
-        try:
-            await broadcast_status(user_id,"offline", db)       # Broadcast status to all servers
-        except Exception as e:
-            pass
-        websocket_manager.disconnect_main(websocket)
+@app.get("/api/room/{room_id}/users")
+def get_voice_users(room_id: int):
+    users = list(websocket_manager.audiovideo_voice_users.get(room_id, []))
+    return {"userIds": users}
 
-async def broadcast_status(user_id,status:str, db: db_dependency):
-    servers = db.query(models.ServerMember).filter(models.ServerMember.user_id == user_id).all()       # Get all servers of user
-    servers_owner = db.query(models.Server).filter(models.Server.owner_id == user_id).all()            # Get all servers owned by user
-    servers = [server.server_id for server in servers]                                                 # Get all server ids from memberships
-    servers.extend([server.id for server in servers_owner])                                            # Extend server ids with owned servers
-
-    #TODO: Add friends
-    friends = None
-    await websocket_manager.broadcastConnections(status, user_id, servers, friends)
-
-
-@app.websocket("/api/ws/server/{server_id}/{user_id}")
-async def websocket_server_endpoint(websocket: WebSocket, server_id: int, user_id: int):
-    """Handle WebSocket connections for a specific server."""
-    
-    websocket.user_id = user_id
-    await websocket_manager.connect_server(websocket, server_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle messages related to the server
-            await websocket_manager.broadcast_server(server_id, f"Message from User {user_id}: {data}")
-    except WebSocketDisconnect:
-        websocket_manager.disconnect_server(websocket, server_id)
-        await websocket_manager.broadcast_server(server_id, f"User {user_id} disconnected from server {server_id}")
-
-@app.websocket("/api/ws/textroom/{room_id}/{user_id}")
-async def websocket_textroom_endpoint(websocket: WebSocket, room_id: int, user_id: int):
-    
-    websocket.user_id = user_id
-    """Handle WebSocket connections for a specific text room."""
-    await websocket_manager.connect_textroom(websocket, room_id)
-    # Notify about user joining the text room
-    await websocket_manager.broadcast_textroom(room_id, f"User {user_id} joined text room {room_id}")
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await websocket_manager.broadcast_textroom( room_id, f"Message from User {user_id} in Text Room {room_id}: {data}")
-    except WebSocketDisconnect:
-        websocket_manager.disconnect_textroom(websocket, room_id)
-        await websocket_manager.broadcast_textroom( room_id, f"User {user_id} left text room {room_id}")
 
 # mount upload folder
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
@@ -823,30 +948,6 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 #         f.write(await file.read())
 #     return {"url": f"/uploads/{filename}"}
 
-class Message(BaseModel):
-    message: str
-    user_token: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[int] = None
-    attachments: Optional[List[str]] = None  # List of file URLs or filenames
-
-    class Config:
-        from_attributes = True
-
-class MessageResponse(BaseModel):
-    message: str
-    room_id: int
-    is_private: bool
-    reply_to: Optional[int]
-    user_id: int
-    timestamp: datetime
-    attachments: Optional[List[str]] = None
-    _id: str
-
-class MessagesRetrieve(BaseModel):
-    room_id: int
-    user_token: str
 
 from fastapi import Form, File, UploadFile, Depends
 from typing import List, Optional
@@ -858,7 +959,7 @@ async def store_message(db: db_dependency,
     user_token: str = Form(...),
     room_id: int = Form(...),
     is_private: bool = Form(...),
-    reply_to: Optional[int] = Form(None),
+    reply_to: Optional[str] = Form(None),
     attachments: List[UploadFile] = File(default=[]),      # <— accept files here
 ) -> MessageResponse:
     # Get user from token
@@ -914,10 +1015,15 @@ async def store_message(db: db_dependency,
     )
 
 @app.post("/api/messages/", response_model=List[MessageResponse])
-async def get_messages(request: MessagesRetrieve, db: db_dependency):
-    # Verify the user token
-    db_user = db.query(models.User).filter(models.User.token == request.user_token).first()
+async def get_messages(request: MessagesRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid token")
 
@@ -954,24 +1060,369 @@ async def get_messages(request: MessagesRetrieve, db: db_dependency):
     # Reverse the order of the messages
     messages.reverse()
 
-    # Return messages directly with _id from MongoDB
+    # Convert MongoDB _id to string
     for message in messages:
-        message['_id'] = str(message['_id'])  # Ensure _id is returned as a string
+        message['_id'] = str(message['_id'])
 
     return messages
 
-async def get_users_connected_server(server_id: int, db: db_dependency) -> List[int]:
-    connected_users = []
-    # Look for all server member ids to see if they are connected to main socket
-    server_members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
-    for server_member in server_members:
-        if any(conn.user_id == server_member.user_id for conn in websocket_manager.main_connections):
-            connected_users.append(server_member.user_id)
-    owner_id = db.query(models.Server).filter(models.Server.id == server_id).first().owner_id
-    if any(conn.user_id == owner_id for conn in websocket_manager.main_connections):
-        connected_users.append(owner_id)
+@app.put("/api/message/edit", response_model=MessageResponse)
+async def edit_message(
+    db: db_dependency,
+    message_id: str = Form(...),
+    room_id: int = Form(...),
+    message: str = Form(...),
+    attachments: List[UploadFile] = File(default=[]),  # Accept files here
+    Authorization: Optional[str] = Header(None),
+):
+    # Extract token from Authorization header
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    # Get the message from MongoDB
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
 
-    return connected_users
+    collection_name = f"server_{server_room.server_id}_room_{server_room.id}"
+    collection = mongo_db[collection_name]
+    message_data = await collection.find_one({"_id": ObjectId(message_id)})
+
+    # check if user can edit the message
+    if db_user.id != message_data["user_id"]:
+        raise HTTPException(status_code=403, detail="User not authorized to edit this message")
+
+    if not message_data:
+        raise HTTPException(status_code=404, detail="Message not found")
+    # Check if the user is authorized to edit the message
+    db_user = db.query(models.User).filter(models.User.id == message_data["user_id"]).first()
+
+    # Update the message content
+    message_data["message"] = message
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Add attachments URLs to the message data
+    message_data["attachments"].extend(file_urls)
+
+    # Update the message in MongoDB
+    await collection.update_one({"_id": ObjectId(message_id)}, {"$set": message_data})
+
+    # Broadcast the updated message
+    room_id = message_data["room_id"]
+    await websocket_manager.broadcast_textroom(room_id, "message_updated")
+
+    return MessageResponse(
+        message=message_data["message"],
+        room_id=message_data["room_id"],
+        is_private=message_data["is_private"],
+        reply_to=message_data.get("reply_to"),
+        user_id=message_data["user_id"],
+        timestamp=message_data["timestamp"],
+        _id=str(message_data["_id"]),
+        attachments=message_data["attachments"],
+    )
+
+
+###################### ASSIGNMENTS ######################
+
+
+@app.post("/api/assignment", response_model=AssignmentResponse)
+async def store_message(db: db_dependency,
+    message: str = Form(...),
+    user_token: str = Form(...),
+    room_id: int = Form(...),
+    is_private: bool = Form(...),
+    reply_to: Optional[str] = Form(None),
+    attachments: List[UploadFile] = File(default=[]),      # <— accept files here
+) -> AssignmentResponse:
+    # Get user from token
+    db_user = db.query(models.User).filter(models.User.token == user_token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid user token")
+
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Check room & membership (unchanged)…
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    # if datetime(server_room.name.split(" ")[1]) < datetime.now():
+    #     raise HTTPException(status_code=400, detail="Assignment expired")
+    # if timedelta(days=1) < datetime.now() - datetime(server_room.name.split(" ")[2]):
+    #     raise HTTPException(status_code=400, detail="Assignment expired")
+
+    server = db.query(models.Server).filter(models.Server.id == server_room.server_id).first()
+    # …membership checks as before…
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        # ext = upload.filename.split(".")[-1]
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Prepare message_data (include attachments URLs)
+    message_data = {
+        "message": message,
+        "user_id": db_user.id,
+        "room_id": room_id,
+        "is_private": is_private,
+        "reply_to": reply_to,
+        "attachments": file_urls,
+        "grade": None,  # Assignments start with no grade
+        "timestamp": datetime.now(),
+    }
+
+    # Insert into Mongo, broadcast, and return (unchanged)…
+    collection = mongo_db[f"server_{server.id}_assignments_{room_id}"]
+    result = await collection.insert_one(message_data)
+
+    
+    await websocket_manager.broadcast_textroom(room_id, "new_message")
+
+    return AssignmentResponse(
+        message=message_data["message"],
+        room_id=message_data["room_id"],
+        is_private=message_data["is_private"],
+        reply_to=message_data["reply_to"],
+        user_id=message_data["user_id"],
+        timestamp=message_data["timestamp"],
+        grade=message_data["grade"],
+        _id=str(result.inserted_id),
+        attachments=message_data["attachments"],
+    )
+
+@app.post("/api/assignments/", response_model=List[AssignmentResponse])
+async def get_messages(request: AssignmentsRetrieve, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Get the server from the room ID
+    room = db.query(models.ServerRoom).filter(models.ServerRoom.id == request.room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    server = db.query(models.Server).filter(models.Server.id == room.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    # Check if the user is a member of the server or the server owner
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == db_user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    server_owner = db.query(models.Server).filter(
+        models.Server.id == server.id, 
+        models.Server.owner_id == db_user.id
+    ).first()
+    if not server_member and not server_owner:
+        raise HTTPException(status_code=403, detail="User is not part of the server")
+
+    # Generate the collection name based on server and room ID
+    collection_name = f"server_{server.id}_assignments_{request.room_id}"
+
+    # Retrieve the last 100 messages from the specific collection in MongoDB
+    # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).limit(100).to_list(length=100)
+    #check if db_user is server owner or level 2
+    if server_owner or (server_member and server_member.access_level > 0):
+        messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
+    else:
+        messages = await mongo_db[collection_name].find({"user_id": db_user.id}).sort("timestamp", -1).to_list(length=1000)
+        # Add messages from server owner or users with access_level > 0 that don't have a "reply_to" field
+        elevated_user_ids = [
+            member.user_id for member in db.query(models.ServerMember)
+            .filter(
+                models.ServerMember.server_id == server.id,
+                models.ServerMember.access_level > 0
+            ).all()
+        ]
+
+        user_message_ids = [str(msg["_id"]) for msg in messages if msg["user_id"] == db_user.id]
+
+        messages.extend(
+            await mongo_db[collection_name].find({
+                "$and": [
+                    {
+                        "user_id": {
+                            "$in": [server.owner_id] + elevated_user_ids
+                        }
+                    },
+                    {
+                        "$or": [
+                            {"reply_to": "0"},
+                            {"reply_to": {"$in": user_message_ids}}
+                        ]
+                    }
+                ]
+            }).sort("timestamp", -1).to_list(length=1000)
+        )
+
+
+    # messages = await mongo_db[collection_name].find({}).sort("timestamp", -1).to_list(length=1000)
+    messages = sorted(messages, key=lambda msg: msg["timestamp"])
+
+    for message in messages:
+        message['_id'] = str(message['_id'])
+
+    return messages
+class GradeAssignment(BaseModel):
+    assignment_id: str
+    room_id: int
+    grade: float
+
+@app.put("/api/assignment/grade", response_model=AssignmentResponse)
+async def grade_assignment(grade_assignment: GradeAssignment, db: db_dependency, authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.replace("Bearer ", "")
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    # Check if the user is a server owner or has access level > 0
+    # Get the server from the room ID
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == grade_assignment.room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    server = db.query(models.Server).filter(models.Server.id == server_room.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    # Check if the user is a server member with access level > 0 or the server owner
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == db_user.id,
+        models.ServerMember.server_id == server.id,
+        models.ServerMember.access_level > 0
+    ).first()
+
+    if not server_member and server.owner_id != db_user.id:
+        raise HTTPException(status_code=403, detail="User is not authorized to grade assignments")
+    # Get the assignment from MongoDB
+    collection_name = f"server_{server.id}_assignments_{grade_assignment.room_id}"
+    assignment = await mongo_db[collection_name].find_one({"_id": ObjectId(grade_assignment.assignment_id)})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    # Update the assignment grade
+    assignment["grade"] = grade_assignment.grade
+    await mongo_db[collection_name].update_one(
+        {"_id": ObjectId(grade_assignment.assignment_id)},
+        {"$set": {"grade": grade_assignment.grade}}
+    )
+    # Convert the assignment to the response model
+    assignment_response = AssignmentResponse(
+        id=grade_assignment.assignment_id,
+        message=assignment["message"],
+        room_id=grade_assignment.room_id,
+        is_private=assignment["is_private"],
+        reply_to=assignment["reply_to"],
+        user_id=assignment["user_id"],
+        timestamp=assignment["timestamp"],
+        grade=assignment["grade"],
+        attachments=assignment.get("attachments", [])
+    )
+    # Broadcast the updated assignment to the room
+    await websocket_manager.broadcast_textroom(grade_assignment.room_id, "assignment_graded")
+    return assignment_response
+
+@app.put("/api/assignment/edit", response_model=AssignmentResponse)
+async def edit_assignment(
+    db: db_dependency,
+    assignment_id: str = Form(...),
+    room_id: int = Form(...),
+    message: str = Form(...),
+    attachments: List[UploadFile] = File(default=[]),
+    authorization: Optional[str] = Header(None)
+):
+    # Extract token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.replace("Bearer ", "")
+
+    # Verify the user token
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    if db_user.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+
+    # Retrieve the server ID from the room
+    server_room = db.query(models.ServerRoom).filter(models.ServerRoom.id == room_id).first()
+    if not server_room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    collection_name = f"server_{server_room.server_id}_assignments_{room_id}"
+    assignment = await mongo_db[collection_name].find_one({"_id": ObjectId(assignment_id)})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    if assignment["user_id"] != db_user.id:
+        raise HTTPException(status_code=403, detail="You are not authorized to edit this assignment")
+
+    # Save uploaded files to disk and collect URLs
+    file_urls: List[str] = []
+    for upload in attachments:
+        name = f"{uuid.uuid4().hex}_{upload.filename}"
+        dest = os.path.join(UPLOAD_DIR, name)
+        with open(dest, "wb") as out:
+            out.write(await upload.read())
+        file_urls.append(f"http://lamzaone.go.ro:8000/uploads/{name}")
+
+    # Update the assignment message and attachments
+    await mongo_db[collection_name].update_one(
+        {"_id": ObjectId(assignment_id)},
+        {"$set": {"message": message, "attachments": file_urls}}
+    )
+
+    # Prepare the response
+    assignment_response = AssignmentResponse(
+        _id=str(assignment_id),
+        message=message,
+        room_id=room_id,
+        is_private=assignment["is_private"],
+        reply_to=assignment["reply_to"],
+        user_id=assignment["user_id"],
+        timestamp=assignment["timestamp"],
+        grade=assignment.get("grade", None),
+        attachments=file_urls
+    )
+
+    # Broadcast the updated assignment to the room
+    await websocket_manager.broadcast_textroom(room_id, "assignment_edited")
+    return assignment_response
+
+
+
 
 
 import uvicorn

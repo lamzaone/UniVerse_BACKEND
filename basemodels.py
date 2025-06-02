@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 class TokenRequest(BaseModel):
     token: str
@@ -49,6 +49,7 @@ class ServerMember(BaseModel):
 class RoomCategory(BaseModel):
     id: int
     name: str
+    category_type: str
     server_id: int
     position: int
 
@@ -57,3 +58,63 @@ class ServerCreate(BaseModel):
     name: str
     description: str
     owner_id: int
+
+class Message(BaseModel):
+    message: str
+    user_token: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[int] = None
+    attachments: Optional[List[str]] = None  # List of file URLs or filenames
+
+    class Config:
+        from_attributes = True
+
+# TODO: fix like in AssignmentResponse
+class MessageResponse(BaseModel):    
+    id: str = Field(..., alias="_id")
+    message: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[str] = None
+    user_id: int
+    timestamp: datetime
+    attachments: Optional[List[str]] = None
+
+    class Config:
+        populate_by_name = True
+
+class MessagesRetrieve(BaseModel):
+    room_id: int
+    user_token: str
+
+
+
+class Assignment(BaseModel):
+    message: str
+    user_token: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[str] = None
+    attachments: Optional[List[str]] = None  # List of file URLs or filenames
+
+    class Config:
+        from_attributes = True
+
+class AssignmentResponse(BaseModel):
+    id: str = Field(..., alias="_id")
+    message: str
+    room_id: int
+    is_private: bool
+    reply_to: Optional[str] = None
+    user_id: int
+    timestamp: datetime
+    grade: Optional[float] = None
+    attachments: Optional[List[str]] = None
+
+    class Config:
+        populate_by_name = True
+
+class AssignmentsRetrieve(BaseModel):
+    room_id: int
+    user_token: str
