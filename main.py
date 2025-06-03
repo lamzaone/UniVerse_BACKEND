@@ -1607,7 +1607,7 @@ async def create_week(server_id: int, db: db_dependency, Authorization: Optional
             server_id=server_id,
             date=datetime.now(),
             status="absent",
-            week=new_week
+            week_id=new_week.id  # Use week_id instead of passing the entire object
         )
         db.add(attendance)
     db.commit()
@@ -1665,7 +1665,7 @@ async def get_attendance_for_week(server_id: int, week_number: int, db: db_depen
     if not week:
         raise HTTPException(status_code=404, detail="Week not found")
 
-    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week=week).all()
+    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week_id=week.id).all()
 
     result = [{
         "user_id": a.user_id,
