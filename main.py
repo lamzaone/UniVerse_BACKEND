@@ -1505,11 +1505,10 @@ async def edit_attendance(server_id: int, attendance_edit: AttendanceEditRequest
         week=db_attendance.week
     )
     
-class ServerWeekCreateRequest(BaseModel):
-    week_number: int
+
 
 @app.post("/api/server/{server_id}/weeks/create")
-async def create_week(server_id: int, request: ServerWeekCreateRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
+async def create_week(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
     # Token validation
     if not Authorization or not Authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -1530,8 +1529,10 @@ async def create_week(server_id: int, request: ServerWeekCreateRequest, db: db_d
     if not server_member and server.owner_id != admin.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # get number of weeks already created for this server
+    existing_weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).count()
     # Create the week
-    new_week = models.ServerWeek(server_id=server_id, week_number=request.week_number)
+    new_week = models.ServerWeek(server_id=server_id, week_number=existing_weeks + 1)
     db.add(new_week)
     db.commit()
     db.refresh(new_week)
@@ -1548,8 +1549,11 @@ async def create_week(server_id: int, request: ServerWeekCreateRequest, db: db_d
         )
         db.add(attendance)
     db.commit()
+    
+    # Broadcast the new week creation
+    await websocket_manager.broadcast_server(server_id, "week_created")
 
-    return {"message": f"Week {request.week_number} created and attendance set to 'absent' for all members."}
+    return {"message": f"Week {new_week.week_number} created and attendance set to 'absent' for all members."}
 
 @app.get("/api/server/{server_id}/week/{week_number}/attendance")
 async def get_attendance_for_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
