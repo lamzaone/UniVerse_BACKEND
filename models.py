@@ -52,6 +52,29 @@ class Server(Base):
     owner = relationship("User", back_populates="servers_owned")
     members = relationship("ServerMember", back_populates="server")
     categories = relationship("RoomCategory", back_populates="server")
+    weeks = relationship("ServerWeek", back_populates="server")
+
+class Attendance(Base):
+    __tablename__ = "attendance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("user.id"))
+    server_id = Column(Integer, ForeignKey("server.id"))
+    date = Column(DateTime)
+    status = Column(String)  # e.g., "present", "absent", "excused"
+    week_id = Column(Integer, ForeignKey("server_week.id"))
+    week = relationship("ServerWeek", back_populates="attendances")
+    user = relationship("User")
+    server = relationship("Server")
+
+class ServerWeek(Base):
+    __tablename__ = "server_week"
+
+    id = Column(Integer, primary_key=True, index=True)
+    server_id = Column(Integer, ForeignKey("server.id"))
+    week_number = Column(Integer)  # Week number in the semester
+    server = relationship("Server", back_populates="weeks")
+    attendances = relationship("Attendance", back_populates="week")  # Add this relationship
 
 # Server Member Model
 class ServerMember(Base):
@@ -64,6 +87,8 @@ class ServerMember(Base):
     server = relationship("Server", back_populates="members")
     grades = Column(String, default="")  # Store grades as JSON
     attendances = Column(String, default="")  # Store attendance as a JSON string or similar format
+
+
 
 # Room Category Model
 class RoomCategory(Base):

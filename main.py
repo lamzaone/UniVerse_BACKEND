@@ -541,7 +541,7 @@ def get_user(user_id: int, db: db_dependency):
 
 # Create a new server
 @app.post("/api/server/create", response_model=Server)
-def create_server(server: ServerCreate, db: db_dependency):
+async def create_server(server: ServerCreate, db: db_dependency):
     db_server = models.Server(
         name=server.name,
         description=server.description,
@@ -550,11 +550,34 @@ def create_server(server: ServerCreate, db: db_dependency):
     db_server.invite_code=secrets.token_urlsafe(4),
     db_server.created_at=datetime.now()
 
-    
+
+    # Add the server to the database
     db.add(db_server)
     db.commit()
     db.refresh(db_server)
-    
+
+    # Create the first week for the server
+    first_week = models.ServerWeek(
+        server_id=db_server.id,
+        week_number=1
+    )
+    db.add(first_week)
+    db.commit()
+    db.refresh(first_week)
+
+    # Add "absent" attendance for each member with access_level 0
+    members = db.query(models.ServerMember).filter_by(server_id=db_server.id, access_level=0).all()
+    for member in members:
+        attendance = models.Attendance(
+            user_id=member.user_id,
+            server_id=db_server.id,
+            date=datetime.now(),
+            status="absent",
+            week=first_week
+        )
+        db.add(attendance)
+    db.commit()
+
     return db_server
 
 # Get all servers of user
@@ -596,30 +619,62 @@ async def edit_server(server_id: int, server_name: str, server_description: str,
 # Get a server by ID
 class GetServer(BaseModel):
     server_id: int
-    user_id: int
-@app.post("/api/server", response_model=Server)
-def get_server(server_info: GetServer, db: db_dependency):
+class ServerWithAccessLevel(Server):
+    access_level: int
+
+@app.post("/api/server", response_model=ServerWithAccessLevel)
+def get_server(server_info: GetServer, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # extract user from token
+    token = Authorization.split(" ")[1] if Authorization else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = db_user.id
+
     try:
         db_server = db.query(models.Server).filter(models.Server.id == server_info.server_id).first()
         if not db_server:
             raise HTTPException(status_code=404, detail="Server not found")
         
         is_member = db.query(models.ServerMember).filter(
-            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.user_id == user_id,
             models.ServerMember.server_id == server_info.server_id
         ).first()
 
         is_owner = db.query(models.Server).filter(
             models.Server.id == server_info.server_id,
-            models.Server.owner_id == server_info.user_id
+            models.Server.owner_id == user_id
         ).first()
         
+        # get access level
+        access_level = 0
+        if is_member:
+            access_level = is_member.access_level
+        elif is_owner:
+            access_level = 3
         # If the user is not a member, raise an exception
         if not is_member and not is_owner:
             raise HTTPException(status_code=403, detail="User is not a member of the server")
         
+        # add weeks to the server
+        weeks = db.query(models.ServerWeek).filter(models.ServerWeek.server_id == db_server.id).all()
+        db_server.weeks = [week for week in weeks]  # Convert to list of ServerWeek objects
+        # Create the response model with access level
+        server_response = ServerWithAccessLevel(
+            id=db_server.id,
+            name=db_server.name,
+            description=db_server.description,
+            owner_id=db_server.owner_id,
+            invite_code=db_server.invite_code,
+            created_at=db_server.created_at,
+            weeks=db_server.weeks,  # Include the weeks in the response
+            access_level=access_level  # Add access level to the response
+        )
+        
         # Return the server details if checks pass
-        return db_server
+        return server_response
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1423,6 +1478,267 @@ async def edit_assignment(
 
 
 
+#################################### ATTENDANCE #########################################
+class AttendanceCreateRequest(BaseModel):
+    user_id: int
+    date: datetime
+    status: str  # e.g., "present", "absent", "excused"
+    week: int
+class AttendanceEditRequest(BaseModel):
+    attendance_id: int
+    status: str  # e.g., "present", "absent", "excused"
+
+@app.put("/api/server/{server_id}/attendance/edit", response_model=AttendanceCreateRequest)
+async def edit_attendance(server_id: int, attendance_edit: AttendanceEditRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Extract token from Authorization header
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    # Verify the user token
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin:
+        raise HTTPException(status_code=400, detail="Invalid user token")
+    if admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=400, detail="Token expired")
+    # Check if the user is server owner or has access level > 0
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == admin.id,
+        models.ServerMember.server_id == server.id,
+        models.ServerMember.access_level > 0
+    ).first()
+    if not server_member and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="User is not authorized to edit attendance records")
+    # Find the attendance record
+    db_attendance = db.query(models.Attendance).filter(
+        models.Attendance.id == attendance_edit.attendance_id,
+        models.Attendance.server_id == server_id
+    ).first()
+    if not db_attendance:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    # Update the attendance record
+    db_attendance.status = attendance_edit.status
+    db.commit()
+    db.refresh(db_attendance)
+    # Broadcast the attendance record update
+    await websocket_manager.broadcast_server(server_id, "attendance_updated")
+
+    return AttendanceCreateRequest(
+        user_id=db_attendance.user_id,
+        date=db_attendance.date,
+        status=db_attendance.status,
+        week=db_attendance.week
+    )
+    
+
+
+@app.post("/api/server/{server_id}/weeks/create")
+async def create_week(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Token validation
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Authorization check
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == admin.id,
+        models.ServerMember.server_id == server.id,
+        models.ServerMember.access_level > 0
+    ).first()
+    if not server_member and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # get number of weeks already created for this server
+    existing_weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).count()
+    # Create the week
+    new_week = models.ServerWeek(server_id=server_id, week_number=existing_weeks + 1)
+    db.add(new_week)
+    db.commit()
+    db.refresh(new_week)
+
+    # Add "absent" attendance for each member with access_level 0
+    members = db.query(models.ServerMember).filter_by(server_id=server_id, access_level=0).all()
+    for member in members:
+        attendance = models.Attendance(
+            user_id=member.user_id,
+            server_id=server_id,
+            date=datetime.now(),
+            status="absent",
+            week=new_week
+        )
+        db.add(attendance)
+    db.commit()
+    
+    # Broadcast the new week creation
+    await websocket_manager.broadcast_server(server_id, "week_created")
+
+    return {"message": f"Week {new_week.week_number} created and attendance set to 'absent' for all members."}
+
+@app.get("/api/server/{server_id}/week/{week_number}/attendance")
+async def get_attendance_for_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Token check
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Validate access
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=user.id).first()
+    if not server_member and server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Fetch week and attendance
+    week = db.query(models.ServerWeek).filter_by(server_id=server_id, week_number=week_number).first()
+    if not week:
+        raise HTTPException(status_code=404, detail="Week not found")
+
+    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week=week).all()
+
+    result = [{
+        "user_id": a.user_id,
+        "status": a.status,
+        "date": a.date
+    } for a in attendance_records]
+
+    return {"week": week_number, "attendance": result}
+
+@app.get("/api/server/{server_id}/weeks")
+async def list_weeks(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    
+    is_member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=user.id).first()
+    if not is_member and server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).all()
+    return [{"id": w.id, "week_number": w.week_number} for w in weeks]
+
+@app.get("/api/server/{server_id}/user/{user_id}/attendance")
+async def user_attendance(server_id: int, user_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    requester = db.query(models.User).filter(models.User.token == token).first()
+    if not requester or requester.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    if requester.id != user_id:
+        # Admin check
+        server_member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=requester.id).first()
+        if not server_member or server_member.access_level <= 0 and server.owner_id != requester.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    attendance = db.query(models.Attendance).filter_by(server_id=server_id, user_id=user_id).all()
+    return [{
+        "week_number": a.week.week_number if a.week else None,
+        "date": a.date,
+        "status": a.status
+    } for a in attendance]
+
+class BulkAttendanceEditRequest(BaseModel):
+    updates: List[AttendanceEditRequest]  # attendance_id + status
+
+@app.put("/api/server/{server_id}/week/{week_number}/attendance/bulk_edit")
+async def bulk_edit_attendance(server_id: int, week_number: int, request: BulkAttendanceEditRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
+    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    for edit in request.updates:
+        record = db.query(models.Attendance).filter_by(id=edit.attendance_id, server_id=server_id).first()
+        if record:
+            record.status = edit.status
+    db.commit()
+    await websocket_manager.broadcast_server(server_id, "bulk_attendance_updated")
+    return {"message": "Attendance updated."}
+
+from fastapi.responses import StreamingResponse
+import csv
+import io
+
+@app.get("/api/server/{server_id}/attendance/export")
+async def export_attendance(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
+    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    records = db.query(models.Attendance).filter_by(server_id=server_id).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["User ID", "Week Number", "Date", "Status"])
+    for rec in records:
+        writer.writerow([rec.user_id, rec.week.week_number if rec.week else "", rec.date, rec.status])
+
+    output.seek(0)
+    return StreamingResponse(output, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=attendance.csv"})
+
+@app.delete("/api/server/{server_id}/week/{week_number}")
+async def delete_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    if admin.id != server.owner_id:
+        member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
+        if not member or member.access_level <= 0:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    week = db.query(models.ServerWeek).filter_by(server_id=server_id, week_number=week_number).first()
+    if not week:
+        raise HTTPException(status_code=404, detail="Week not found")
+
+    # Delete all related attendance first (cascading isn't configured here)
+    db.query(models.Attendance).filter_by(server_id=server_id).filter(models.Attendance.week == week).delete()
+    db.delete(week)
+    db.commit()
+
+    return {"message": f"Week {week_number} and related attendance deleted."}
 
 
 import uvicorn

@@ -28,6 +28,37 @@ class Server(BaseModel):
     owner_id: int
     invite_code: str
     created_at: datetime
+    weeks: Optional[List["ServerWeek"]] = None  # List of ServerWeek objects
+
+    class Config:
+        from_attributes = True
+
+
+class Attendance(BaseModel):
+    id: int
+    user_id: int
+    server_id: int
+    date: datetime
+    status: str  # e.g., "present", "absent", "excused"
+    week_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class ServerWeek(BaseModel):
+    id: int
+    server_id: int
+    week_number: int  # Week number in the semester
+
+    class Config:
+        from_attributes = True
+    id: int
+    server_id: int
+    week_number: int  # Week number in the semester
+
+    class Config:
+        from_attributes = True
 
 
 class ServerRoom(BaseModel):
