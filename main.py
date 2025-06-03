@@ -619,24 +619,41 @@ async def edit_server(server_id: int, server_name: str, server_description: str,
 # Get a server by ID
 class GetServer(BaseModel):
     server_id: int
-    user_id: int
-@app.post("/api/server", response_model=Server)
-def get_server(server_info: GetServer, db: db_dependency):
+class ServerWithAccessLevel(Server):
+    access_level: int
+
+@app.post("/api/server", response_model=ServerWithAccessLevel)
+def get_server(server_info: GetServer, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # extract user from token
+    token = Authorization.split(" ")[1] if Authorization else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = db_user.id
+
     try:
         db_server = db.query(models.Server).filter(models.Server.id == server_info.server_id).first()
         if not db_server:
             raise HTTPException(status_code=404, detail="Server not found")
         
         is_member = db.query(models.ServerMember).filter(
-            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.user_id == user_id,
             models.ServerMember.server_id == server_info.server_id
         ).first()
 
         is_owner = db.query(models.Server).filter(
             models.Server.id == server_info.server_id,
-            models.Server.owner_id == server_info.user_id
+            models.Server.owner_id == user_id
         ).first()
         
+        # get access level
+        access_level = 0
+        if is_member:
+            access_level = is_member.access_level
+        elif is_owner:
+            access_level = 3
         # If the user is not a member, raise an exception
         if not is_member and not is_owner:
             raise HTTPException(status_code=403, detail="User is not a member of the server")
@@ -644,10 +661,20 @@ def get_server(server_info: GetServer, db: db_dependency):
         # add weeks to the server
         weeks = db.query(models.ServerWeek).filter(models.ServerWeek.server_id == db_server.id).all()
         db_server.weeks = [week for week in weeks]  # Convert to list of ServerWeek objects
-
+        # Create the response model with access level
+        server_response = ServerWithAccessLevel(
+            id=db_server.id,
+            name=db_server.name,
+            description=db_server.description,
+            owner_id=db_server.owner_id,
+            invite_code=db_server.invite_code,
+            created_at=db_server.created_at,
+            weeks=db_server.weeks,  # Include the weeks in the response
+            access_level=access_level  # Add access level to the response
+        )
         
         # Return the server details if checks pass
-        return db_server
+        return server_response
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
