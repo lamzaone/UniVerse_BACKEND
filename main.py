@@ -362,6 +362,15 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         logging.error(f"Failed to fetch image from URL: {image_url}")
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
+def get_current_user( db: db_dependency, Authorization: str = Header(...)):
+    if not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user
+
 # Get user profile picture from the filesystem
 @app.get("/api/images/{image_name}")
 async def serve_image(image_name: str):
@@ -709,10 +718,23 @@ def get_room(server_id: int, room_id: int, db: db_dependency, authorization: Opt
 # Join a server
 class JoinServer(BaseModel):
     invite_code: str
-    user_id: int
 @app.post("/api/server/join", response_model=Server)
-async def join_server(server_info: JoinServer, db: db_dependency):
+async def join_server(server_info: JoinServer, db: db_dependency, Authorization: Optional[str] = Header(None)):
     try:
+        # extract user from token
+        token = Authorization.split(" ")[1] if Authorization else None
+        if not token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        db_user = db.query(models.User).filter(models.User.token == token).first()
+        if not db_user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        user_id = db_user.id
+        # Check if the invite code is provided
+        if not server_info.invite_code:
+            raise HTTPException(status_code=400, detail="Invite code is required")
+        # Check if the user ID is provided
+        
+
         # Fetch the server using the invite code
         db_server = db.query(models.Server).filter(models.Server.invite_code == server_info.invite_code).first()
         
@@ -721,7 +743,7 @@ async def join_server(server_info: JoinServer, db: db_dependency):
         
         # Check if the user is already a member of the server
         is_member = db.query(models.ServerMember).filter(
-            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.user_id == user_id,
             models.ServerMember.server_id == db_server.id  # Correct filtering by server_id
         ).first()
         
@@ -730,13 +752,26 @@ async def join_server(server_info: JoinServer, db: db_dependency):
         
         # Add the user as a new member to the server
         db_member = models.ServerMember(
-            user_id=server_info.user_id,
+            user_id=user_id,
             server_id=db_server.id  # Use the server's ID from the fetched server
         )
         db.add(db_member)
+
+        # initialize all the attendance to absent for all weeks
+        weeks = db.query(models.ServerWeek).filter(models.ServerWeek.server_id == db_server.id).all()
+        for week in weeks:
+            attendance = models.Attendance(
+                user_id=user_id,
+                server_id=db_server.id,
+                status="absent",
+                week_id=week.id  # Use week.id instead of the entire week object
+            )
+            db.add(attendance)
+
+
         db.commit()
 
-        await websocket_manager.broadcast_server(server_id=db_server.id, message=f"{server_info.user_id}: joined")
+        await websocket_manager.broadcast_server(server_id=db_server.id, message=f"{db_user.id}: joined")
 
         # Return the server information
         return db_server
@@ -1582,6 +1617,31 @@ async def create_week(server_id: int, db: db_dependency, Authorization: Optional
 
     return {"message": f"Week {new_week.week_number} created and attendance set to 'absent' for all members."}
 
+# TODO: Fix /weeks endpoint
+@app.get("/api/server/{server_id}/weeks")
+async def get_weeks(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Token validation
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Authorization check
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server_member and server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    # Fetch weeks
+    weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).all()
+    result = [{"id": week.id, "week_number": week.week_number} for week in weeks]
+    return result
+
 @app.get("/api/server/{server_id}/week/{week_number}/attendance")
 async def get_attendance_for_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
     # Token check
@@ -1739,6 +1799,64 @@ async def delete_week(server_id: int, week_number: int, db: db_dependency, Autho
     db.commit()
 
     return {"message": f"Week {week_number} and related attendance deleted."}
+
+@app.get("/api/server/{server_id}/attendance/full")
+async def full_attendance(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
+    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Get all users in the server
+    users = db.query(models.User.id, models.User.username).join(models.ServerMember, models.User.id == models.ServerMember.user_id)\
+            .filter(models.ServerMember.server_id == server_id).all()
+
+    # Get all weeks
+    weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).order_by(models.ServerWeek.week_number).all()
+
+    # Get all attendance records
+    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id).all()
+
+    # Build mapping (user_id -> week_number -> status)
+    attendance_map = {}
+    for rec in attendance_records:
+        if rec.user_id not in attendance_map:
+            attendance_map[rec.user_id] = {}
+        attendance_map[rec.user_id][rec.week.week_number if rec.week else 0] = {
+            "status": rec.status,
+            "attendance_id": rec.id
+        }
+
+    # Structure response
+    response = {
+        "weeks": [{"id": w.id, "week_number": w.week_number} for w in weeks],
+        "users": []
+    }
+    for user in users:
+        user_attendance = {
+            "id": user.id,
+            "name": user.username,
+            "attendance": {},  # week_number -> status
+            "attendance_ids": {}  # week_number -> attendance_id
+        }
+        for week in weeks:
+            record = attendance_map.get(user.id, {}).get(week.week_number)
+            if record:
+                user_attendance["attendance"][week.week_number] = record["status"]
+                user_attendance["attendance_ids"][week.week_number] = record["attendance_id"]
+            else:
+                user_attendance["attendance"][week.week_number] = "absent"
+        response["users"].append(user_attendance)
+
+    return response
 
 
 import uvicorn
