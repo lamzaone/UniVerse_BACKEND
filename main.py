@@ -541,7 +541,7 @@ def get_user(user_id: int, db: db_dependency):
 
 # Create a new server
 @app.post("/api/server/create", response_model=Server)
-def create_server(server: ServerCreate, db: db_dependency):
+async def create_server(server: ServerCreate, db: db_dependency):
     db_server = models.Server(
         name=server.name,
         description=server.description,
@@ -550,11 +550,34 @@ def create_server(server: ServerCreate, db: db_dependency):
     db_server.invite_code=secrets.token_urlsafe(4),
     db_server.created_at=datetime.now()
 
-    
+
+    # Add the server to the database
     db.add(db_server)
     db.commit()
     db.refresh(db_server)
-    
+
+    # Create the first week for the server
+    first_week = models.ServerWeek(
+        server_id=db_server.id,
+        week_number=1
+    )
+    db.add(first_week)
+    db.commit()
+    db.refresh(first_week)
+
+    # Add "absent" attendance for each member with access_level 0
+    members = db.query(models.ServerMember).filter_by(server_id=db_server.id, access_level=0).all()
+    for member in members:
+        attendance = models.Attendance(
+            user_id=member.user_id,
+            server_id=db_server.id,
+            date=datetime.now(),
+            status="absent",
+            week=first_week
+        )
+        db.add(attendance)
+    db.commit()
+
     return db_server
 
 # Get all servers of user
@@ -617,6 +640,11 @@ def get_server(server_info: GetServer, db: db_dependency):
         # If the user is not a member, raise an exception
         if not is_member and not is_owner:
             raise HTTPException(status_code=403, detail="User is not a member of the server")
+        
+        # add weeks to the server
+        weeks = db.query(models.ServerWeek).filter(models.ServerWeek.server_id == db_server.id).all()
+        db_server.weeks = [week for week in weeks]  # Convert to list of ServerWeek objects
+
         
         # Return the server details if checks pass
         return db_server
@@ -1423,7 +1451,7 @@ async def edit_assignment(
 
 
 
-#################### ATTENDANCE ####################
+#################################### ATTENDANCE #########################################
 class AttendanceCreateRequest(BaseModel):
     user_id: int
     date: datetime

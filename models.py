@@ -62,6 +62,7 @@ class Attendance(Base):
     server_id = Column(Integer, ForeignKey("server.id"))
     date = Column(DateTime)
     status = Column(String)  # e.g., "present", "absent", "excused"
+    week_id = Column(Integer, ForeignKey("server_week.id"))
     week = relationship("ServerWeek", back_populates="attendances")
     user = relationship("User")
     server = relationship("Server")
