@@ -86,7 +86,6 @@ class ServerMember(Base):
     user = relationship("User", back_populates="memberships")
     server = relationship("Server", back_populates="members")
     grades = Column(String, default="")  # Store grades as JSON
-    attendances = Column(String, default="")  # Store attendance as a JSON string or similar format
 
 
 
