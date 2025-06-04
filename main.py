@@ -762,7 +762,8 @@ async def join_server(server_info: JoinServer, db: db_dependency, Authorization:
         for week in weeks:
             attendance = models.Attendance(
                 user_id=user_id,
-                server_id=db_server.id,
+                server_id=db_server.id,                
+                date=datetime.now(),
                 status="absent",
                 week_id=week.id  # Use week.id instead of the entire week object
             )
@@ -1642,6 +1643,8 @@ async def get_weeks(server_id: int, db: db_dependency, Authorization: Optional[s
     result = [{"id": week.id, "week_number": week.week_number} for week in weeks]
     return result
 
+
+
 @app.get("/api/server/{server_id}/week/{week_number}/attendance")
 async def get_attendance_for_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
     # Token check
@@ -1669,8 +1672,10 @@ async def get_attendance_for_week(server_id: int, week_number: int, db: db_depen
 
     result = [{
         "user_id": a.user_id,
+        "user_name": a.user.name,
         "status": a.status,
-        "date": a.date
+        "date": a.date,
+        "attendance_id": a.id
     } for a in attendance_records]
 
     return {"week": week_number, "attendance": result}
@@ -1723,22 +1728,21 @@ class BulkAttendanceEditRequest(BaseModel):
 @app.put("/api/server/{server_id}/week/{week_number}/attendance/bulk_edit")
 async def bulk_edit_attendance(server_id: int, week_number: int, request: BulkAttendanceEditRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
     token = Authorization.replace("Bearer ", "") if Authorization else None
-    admin = db.query(models.User).filter(models.User.token == token).first()
-    if not admin or admin.token_expiry < datetime.now():
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user or db_user.token_expiry < datetime.now():
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
     server = db.query(models.Server).filter_by(id=server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-
-    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
-    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=db_user.id).first()
+    if member and member.access_level <= 0 or server.owner_id != db_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
     for edit in request.updates:
         record = db.query(models.Attendance).filter_by(id=edit.attendance_id, server_id=server_id).first()
         if record:
             record.status = edit.status
+            record.date = datetime.now()  # Update date to now
     db.commit()
     await websocket_manager.broadcast_server(server_id, "bulk_attendance_updated")
     return {"message": "Attendance updated."}
