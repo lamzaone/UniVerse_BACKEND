@@ -1869,43 +1869,46 @@ class AddGradeRequest(BaseModel):
     user_id: int
     grade: float
 
+class EditGradeRequest(BaseModel):
+    user_id: int
+    grade: float
+    assignment_id: Optional[str] = None
+    date: Optional[datetime] = None
+
 @app.post("/api/server/{server_id}/admin/grade", response_model=List[dict])
 async def add_student_grade(server_id: int, grade_request: AddGradeRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
-    # Token validation
     if not Authorization or not Authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = Authorization.replace("Bearer ", "")
     user = db.query(models.User).filter(models.User.token == token).first()
     if not user or user.token_expiry < datetime.now():
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    # Authorization check
+
     server = db.query(models.Server).filter(models.Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
     server_member = db.query(models.ServerMember).filter(
         models.ServerMember.user_id == user.id,
         models.ServerMember.server_id == server.id
     ).first()
     if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
         raise HTTPException(status_code=403, detail="User is not authorized to add grades for this student")
-    
-    # Fetch the student record
+
     student_member = db.query(models.ServerMember).filter(
         models.ServerMember.user_id == grade_request.user_id,
         models.ServerMember.server_id == server_id
     ).first()
     if not student_member:
         raise HTTPException(status_code=404, detail="Student not found in the server")
-    
-    # Add grade to server_member.grades
+
     grades = {}
     if student_member.grades:
         try:
             grades = json.loads(student_member.grades)
         except json.JSONDecodeError:
             raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
-    
-    # Add the new grade
+
     grades[str(datetime.now())] = {
         "assignment_id": None,
         "room_id": None,
@@ -1918,58 +1921,49 @@ async def add_student_grade(server_id: int, grade_request: AddGradeRequest, db: 
 
     return [{"user_id": grade_request.user_id, "grade": grade_request.grade}]
 
-class EditGradeRequest(BaseModel):
-    user_id: int
-    grade: float
-    assignment_id: Optional[str] = None  # Optional, if provided, will be used to identify the assignment
-    date: Optional[datetime] = None  # Optional, if provided, will be used to identify the assignment date
-
 @app.put("/api/server/{server_id}/admin/grade", response_model=List[dict])
 async def update_student_grade(server_id: int, grade_request: EditGradeRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
-    # Token validation
     if not Authorization or not Authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = Authorization.replace("Bearer ", "")
     user = db.query(models.User).filter(models.User.token == token).first()
     if not user or user.token_expiry < datetime.now():
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    # Authorization check
+
     server = db.query(models.Server).filter(models.Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
     server_member = db.query(models.ServerMember).filter(
         models.ServerMember.user_id == user.id,
         models.ServerMember.server_id == server.id
     ).first()
     if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
         raise HTTPException(status_code=403, detail="User is not authorized to update grades for this student")
-    # Fetch the student record
+
     student_member = db.query(models.ServerMember).filter(
         models.ServerMember.user_id == grade_request.user_id,
         models.ServerMember.server_id == server_id
     ).first()
     if not student_member:
         raise HTTPException(status_code=404, detail="Student not found in the server")
-    # Update grade in server_member.grades
+
     grades = {}
+    if student_member.grades:
+        try:
+            grades = json.loads(student_member.grades)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
+
     if grade_request.date:
-        # Update grade in student_member.grades
-        if student_member.grades:
-            try:
-                grades = json.loads(student_member.grades)
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
-            
-            for key, value in grades.items():
-                if value.get("date") == grade_request.date.isoformat():
-                    value["grade"] = grade_request.grade
-                    break
-            else:
-                raise HTTPException(status_code=404, detail="Grade entry not found for the provided date")
+        for key, value in grades.items():
+            if value.get("date") == grade_request.date.isoformat():
+                value["grade"] = grade_request.grade
+                break
         else:
-            raise HTTPException(status_code=404, detail="No grades found for the student")
+            raise HTTPException(status_code=404, detail="Grade entry not found for the provided date")
+
     elif grade_request.assignment_id:
-        # Update grade in MongoDB collection
         collection_name = f"server_{server_id}_assignments_{grade_request.assignment_id}"
         assignment = await mongo_db[collection_name].find_one({
             "user_id": grade_request.user_id,
@@ -1977,15 +1971,15 @@ async def update_student_grade(server_id: int, grade_request: EditGradeRequest, 
         })
         if not assignment:
             raise HTTPException(status_code=404, detail="Assignment not found")
-        
-        assignment["grade"] = grade_request.grade
+
         await mongo_db[collection_name].update_one(
             {"_id": ObjectId(grade_request.assignment_id)},
             {"$set": {"grade": grade_request.grade}}
         )
+
     else:
         raise HTTPException(status_code=400, detail="Either assignment_id or date must be provided to update the grade")
-    
+
     student_member.grades = json.dumps(grades)
     db.commit()
     db.refresh(student_member)
@@ -1994,29 +1988,25 @@ async def update_student_grade(server_id: int, grade_request: EditGradeRequest, 
 
 @app.get("/api/server/{server_id}/user/{user_id}/grades")
 async def get_student_grades(server_id: int, user_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
-    # Token validation
     if not Authorization or not Authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = Authorization.replace("Bearer ", "")
     user = db.query(models.User).filter(models.User.token == token).first()
     if not user or user.token_expiry < datetime.now():
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Authorization check
+
     server = db.query(models.Server).filter(models.Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
     server_member = db.query(models.ServerMember).filter(
         models.ServerMember.user_id == user.id, 
         models.ServerMember.server_id == server.id
     ).first()
-    if not server.owner_id == user.id or not server_member.id == user_id or not server_member.access_level > 0:
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
         raise HTTPException(status_code=403, detail="User is not authorized to view grades for this student")
-    
-    # fetch grades from assignments collection assignments (they all start with "server_{server_id}_assignments_")
+
     grades = []
-    
-    # Fetch grades
     for collection_name in mongo_db.list_collection_names():
         if collection_name.startswith(f"server_{server_id}_assignments_"):
             assignments = await mongo_db[collection_name].find({"user_id": user_id}).to_list(length=None)
@@ -2025,26 +2015,179 @@ async def get_student_grades(server_id: int, user_id: int, db: db_dependency, Au
                     "assignment_id": str(assignment["_id"]),
                     "room_id": int(collection_name.split("_")[-1]),
                     "grade": assignment.get("grade", None),
-                    "date": None, # Assignments don't have a specific date, use None
+                    "date": None,
                 })
 
-    # add grades from server_member.grades
-    if server_member and server_member.grades:
+    student_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+
+    if student_member and student_member.grades:
         try:
-            grades_json = json.loads(server_member.grades)
-            for grade in grades_json.items():
+            grades_json = json.loads(student_member.grades)
+            for _, grade in grades_json.items():
                 grades.append({
-                    "assignment_id": None, 
+                    "assignment_id": None,
                     "room_id": None,
                     "grade": grade['grade'],
-                    "date": datetime,
-                    
+                    "date": grade.get('date', None),
                 })
         except json.JSONDecodeError:
             raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
-        
+
     return grades
-    
+
+@app.get("/api/server/{server_id}/grades")
+async def get_all_grades(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to view grades")
+
+    grouped_grades: Dict[int, str, List[dict]] = {}
+    members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    for member in members:
+        grouped_grades[member.user_id] = {"name": None, "grades": []}
+        user = db.query(models.User).filter(models.User.id == member.user_id).first()
+        grouped_grades[member.user_id]["name"] = user.name
+        if member.grades:
+            try:
+                grades_json = json.loads(member.grades)
+                for _, grade in grades_json.items():
+                    grouped_grades[member.user_id]["grades"].append({
+                        "assignment_id": None,
+                        "room_id": None,
+                        "grade": grade.get("grade"),
+                        "date": grade.get("date")
+                    })
+            except json.JSONDecodeError:
+                continue
+
+    for collection_name in await mongo_db.list_collection_names():
+        if collection_name.startswith(f"server_{server_id}_assignments_"):
+            room_id = int(collection_name.split("_")[-1])
+            assignments = await mongo_db[collection_name].find({}).sort("grade", -1).to_list(length=None)
+            seen_users = set()
+            for assignment in assignments:
+                uid = assignment.get("user_id")
+                if uid not in seen_users:
+                    seen_users.add(uid)
+                    if uid not in grouped_grades:
+                        grouped_grades[uid] = {"name": None, "grades": []}
+                        user = db.query(models.User).filter(models.User.id == uid).first()
+                        grouped_grades[uid]["name"] = user.name if user else None
+                    grouped_grades[uid]["grades"].append({
+                        "assignment_id": str(assignment.get("_id")),
+                        "room_id": room_id,
+                        "grade": assignment.get("grade"),
+                        "date": None
+                    })
+
+    return [{"user_id": uid, "name": data["name"], "grades": data["grades"]} for uid, data in grouped_grades.items()]
+
+class BulkEditGrade(BaseModel):
+    user_id: int
+    grade: float
+    date: Optional[datetime] = None
+    assignment_id: Optional[str] = None
+    room_id: Optional[int] = None
+
+class BulkGradeUpdateRequest(BaseModel):
+    updates: List[BulkEditGrade]
+
+@app.put("/api/server/{server_id}/grades/bulk_edit")
+async def bulk_edit_grades(
+    server_id: int,
+    request: BulkGradeUpdateRequest,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to update grades")
+
+    results = []
+
+    for update in request.updates:
+        student_member = db.query(models.ServerMember).filter_by(
+            user_id=update.user_id,
+            server_id=server_id
+        ).first()
+
+        if not student_member:
+            continue
+
+        if update.assignment_id and update.room_id is not None:
+            # MongoDB update
+            collection_name = f"server_{server_id}_assignments_{update.room_id}"
+            await mongo_db[collection_name].update_one(
+                {
+                    "user_id": update.user_id,
+                    "_id": ObjectId(update.assignment_id)
+                },
+                {"$set": {"grade": update.grade}},
+                upsert=True
+            )
+        elif update.date:
+            # SQL update (JSON field)
+            grades = {}
+            if student_member.grades:
+                try:
+                    grades = json.loads(student_member.grades)
+                except json.JSONDecodeError:
+                    continue
+
+            updated = False
+            for key, entry in grades.items():
+                if entry.get("date") == update.date.isoformat():
+                    entry["grade"] = update.grade
+                    updated = True
+                    break
+
+            if updated:
+                student_member.grades = json.dumps(grades)
+                db.add(student_member)
+        else:
+            continue  # Skip invalid updates
+
+        results.append({
+            "user_id": update.user_id,
+            "grade": update.grade,
+            "assignment_id": update.assignment_id,
+            "date": update.date
+        })
+
+    db.commit()
+    return results
+
 import uvicorn
 if __name__ == "__main__":
     uvicorn.run(
