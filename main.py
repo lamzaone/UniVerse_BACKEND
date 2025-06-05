@@ -2069,7 +2069,12 @@ async def get_all_grades(server_id: int, db: db_dependency, Authorization: Optio
         raise HTTPException(status_code=403, detail="User is not authorized to view grades")
 
     grouped_grades: Dict[int, str, List[dict]] = {}
-    members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    members = db.query(models.ServerMember)\
+        .filter(
+            models.ServerMember.server_id == server_id,
+            models.ServerMember.access_level == 0,  # Only students
+            models.ServerMember.user_id != server.owner_id  # Exclude server owner
+            ).all()
     for member in members:
         grouped_grades[member.user_id] = {"name": None, "grades": []}
         user = db.query(models.User).filter(models.User.id == member.user_id).first()
@@ -2094,6 +2099,15 @@ async def get_all_grades(server_id: int, db: db_dependency, Authorization: Optio
             seen_users = set()
             for assignment in assignments:
                 uid = assignment.get("user_id")
+                # check to make sure user is not the server owner or has access_level > 0
+                if uid is None or uid == server.owner_id:
+                    continue
+                server_member = db.query(models.ServerMember).filter(
+                    models.ServerMember.user_id == uid, 
+                    models.ServerMember.server_id == server_id
+                ).first()
+                if not server_member or server_member.access_level > 0:
+                    continue
                 if uid not in seen_users:
                     seen_users.add(uid)
                     if uid not in grouped_grades:
