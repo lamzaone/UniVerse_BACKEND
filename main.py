@@ -1966,9 +1966,12 @@ async def update_student_grade(server_id: int, grade_request: EditGradeRequest, 
             raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
 
     if grade_request.date:
-        for key, value in grades.items():
+        for key, value in list(grades.items()):  # Iterate over a copy of the dictionary's items
             if value.get("date") == grade_request.date.isoformat():
-                value["grade"] = grade_request.grade
+                if grade_request.grade == 0:
+                    grades.pop(key)  # Remove the specific grade entry with 0
+                else:
+                    value["grade"] = grade_request.grade
                 break
         else:
             raise HTTPException(status_code=404, detail="Grade entry not found for the provided date")
