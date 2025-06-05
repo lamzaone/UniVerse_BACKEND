@@ -1670,12 +1670,22 @@ async def get_attendance_for_week(server_id: int, week_number: int, db: db_depen
 
     attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week_id=week.id).all()
 
+    for a in attendance_records:
+        # Count total attendances ('present' + 'excused') for the user in the given server
+        a.total = db.query(models.Attendance).filter(
+            models.Attendance.server_id == server_id,
+            models.Attendance.user_id == a.user_id,
+            models.Attendance.status.in_(["present", "excused"])
+        ).count()
+
+    # Prepare the response
     result = [{
         "user_id": a.user_id,
         "user_name": a.user.name,
         "status": a.status,
         "date": a.date,
-        "attendance_id": a.id
+        "attendance_id": a.id,
+        "total": a.total if hasattr(a, 'total') else 0
     } for a in attendance_records]
 
     return {"week": week_number, "attendance": result}
