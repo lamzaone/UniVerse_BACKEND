@@ -362,6 +362,15 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         logging.error(f"Failed to fetch image from URL: {image_url}")
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
+def get_current_user( db: db_dependency, Authorization: str = Header(...)):
+    if not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user
+
 # Get user profile picture from the filesystem
 @app.get("/api/images/{image_name}")
 async def serve_image(image_name: str):
@@ -709,10 +718,23 @@ def get_room(server_id: int, room_id: int, db: db_dependency, authorization: Opt
 # Join a server
 class JoinServer(BaseModel):
     invite_code: str
-    user_id: int
 @app.post("/api/server/join", response_model=Server)
-async def join_server(server_info: JoinServer, db: db_dependency):
+async def join_server(server_info: JoinServer, db: db_dependency, Authorization: Optional[str] = Header(None)):
     try:
+        # extract user from token
+        token = Authorization.split(" ")[1] if Authorization else None
+        if not token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        db_user = db.query(models.User).filter(models.User.token == token).first()
+        if not db_user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        user_id = db_user.id
+        # Check if the invite code is provided
+        if not server_info.invite_code:
+            raise HTTPException(status_code=400, detail="Invite code is required")
+        # Check if the user ID is provided
+        
+
         # Fetch the server using the invite code
         db_server = db.query(models.Server).filter(models.Server.invite_code == server_info.invite_code).first()
         
@@ -721,7 +743,7 @@ async def join_server(server_info: JoinServer, db: db_dependency):
         
         # Check if the user is already a member of the server
         is_member = db.query(models.ServerMember).filter(
-            models.ServerMember.user_id == server_info.user_id,
+            models.ServerMember.user_id == user_id,
             models.ServerMember.server_id == db_server.id  # Correct filtering by server_id
         ).first()
         
@@ -730,13 +752,27 @@ async def join_server(server_info: JoinServer, db: db_dependency):
         
         # Add the user as a new member to the server
         db_member = models.ServerMember(
-            user_id=server_info.user_id,
+            user_id=user_id,
             server_id=db_server.id  # Use the server's ID from the fetched server
         )
         db.add(db_member)
+
+        # initialize all the attendance to absent for all weeks
+        weeks = db.query(models.ServerWeek).filter(models.ServerWeek.server_id == db_server.id).all()
+        for week in weeks:
+            attendance = models.Attendance(
+                user_id=user_id,
+                server_id=db_server.id,                
+                date=datetime.now(),
+                status="absent",
+                week_id=week.id  # Use week.id instead of the entire week object
+            )
+            db.add(attendance)
+
+
         db.commit()
 
-        await websocket_manager.broadcast_server(server_id=db_server.id, message=f"{server_info.user_id}: joined")
+        await websocket_manager.broadcast_server(server_id=db_server.id, message=f"{db_user.id}: joined")
 
         # Return the server information
         return db_server
@@ -1572,7 +1608,7 @@ async def create_week(server_id: int, db: db_dependency, Authorization: Optional
             server_id=server_id,
             date=datetime.now(),
             status="absent",
-            week=new_week
+            week_id=new_week.id  # Use week_id instead of passing the entire object
         )
         db.add(attendance)
     db.commit()
@@ -1581,6 +1617,33 @@ async def create_week(server_id: int, db: db_dependency, Authorization: Optional
     await websocket_manager.broadcast_server(server_id, "week_created")
 
     return {"message": f"Week {new_week.week_number} created and attendance set to 'absent' for all members."}
+
+# TODO: Fix /weeks endpoint
+@app.get("/api/server/{server_id}/weeks")
+async def get_weeks(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Token validation
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Authorization check
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server_member and server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    # Fetch weeks
+    weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).all()
+    result = [{"id": week.id, "week_number": week.week_number} for week in weeks]
+    return result
+
+
 
 @app.get("/api/server/{server_id}/week/{week_number}/attendance")
 async def get_attendance_for_week(server_id: int, week_number: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
@@ -1605,12 +1668,24 @@ async def get_attendance_for_week(server_id: int, week_number: int, db: db_depen
     if not week:
         raise HTTPException(status_code=404, detail="Week not found")
 
-    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week=week).all()
+    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id, week_id=week.id).all()
 
+    for a in attendance_records:
+        # Count total attendances ('present' + 'excused') for the user in the given server
+        a.total = db.query(models.Attendance).filter(
+            models.Attendance.server_id == server_id,
+            models.Attendance.user_id == a.user_id,
+            models.Attendance.status.in_(["present", "excused"])
+        ).count()
+
+    # Prepare the response
     result = [{
         "user_id": a.user_id,
+        "user_name": a.user.name,
         "status": a.status,
-        "date": a.date
+        "date": a.date,
+        "attendance_id": a.id,
+        "total": a.total if hasattr(a, 'total') else 0
     } for a in attendance_records]
 
     return {"week": week_number, "attendance": result}
@@ -1663,22 +1738,21 @@ class BulkAttendanceEditRequest(BaseModel):
 @app.put("/api/server/{server_id}/week/{week_number}/attendance/bulk_edit")
 async def bulk_edit_attendance(server_id: int, week_number: int, request: BulkAttendanceEditRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
     token = Authorization.replace("Bearer ", "") if Authorization else None
-    admin = db.query(models.User).filter(models.User.token == token).first()
-    if not admin or admin.token_expiry < datetime.now():
+    db_user = db.query(models.User).filter(models.User.token == token).first()
+    if not db_user or db_user.token_expiry < datetime.now():
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
     server = db.query(models.Server).filter_by(id=server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-
-    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
-    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=db_user.id).first()
+    if member and member.access_level <= 0 or server.owner_id != db_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
     for edit in request.updates:
         record = db.query(models.Attendance).filter_by(id=edit.attendance_id, server_id=server_id).first()
         if record:
             record.status = edit.status
+            record.date = datetime.now()  # Update date to now
     db.commit()
     await websocket_manager.broadcast_server(server_id, "bulk_attendance_updated")
     return {"message": "Attendance updated."}
@@ -1740,6 +1814,389 @@ async def delete_week(server_id: int, week_number: int, db: db_dependency, Autho
 
     return {"message": f"Week {week_number} and related attendance deleted."}
 
+@app.get("/api/server/{server_id}/attendance/full")
+async def full_attendance(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    token = Authorization.replace("Bearer ", "") if Authorization else None
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter_by(id=server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    member = db.query(models.ServerMember).filter_by(server_id=server_id, user_id=admin.id).first()
+    if not member or member.access_level <= 0 and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Get all users in the server
+    users = db.query(models.User.id, models.User.username).join(models.ServerMember, models.User.id == models.ServerMember.user_id)\
+            .filter(models.ServerMember.server_id == server_id).all()
+
+    # Get all weeks
+    weeks = db.query(models.ServerWeek).filter_by(server_id=server_id).order_by(models.ServerWeek.week_number).all()
+
+    # Get all attendance records
+    attendance_records = db.query(models.Attendance).filter_by(server_id=server_id).all()
+
+    # Build mapping (user_id -> week_number -> status)
+    attendance_map = {}
+    for rec in attendance_records:
+        if rec.user_id not in attendance_map:
+            attendance_map[rec.user_id] = {}
+        attendance_map[rec.user_id][rec.week.week_number if rec.week else 0] = {
+            "status": rec.status,
+            "attendance_id": rec.id
+        }
+
+    # Structure response
+    response = {
+        "weeks": [{"id": w.id, "week_number": w.week_number} for w in weeks],
+        "users": []
+    }
+    for user in users:
+        user_attendance = {
+            "id": user.id,
+            "name": user.username,
+            "attendance": {},  # week_number -> status
+            "attendance_ids": {}  # week_number -> attendance_id
+        }
+        for week in weeks:
+            record = attendance_map.get(user.id, {}).get(week.week_number)
+            if record:
+                user_attendance["attendance"][week.week_number] = record["status"]
+                user_attendance["attendance_ids"][week.week_number] = record["attendance_id"]
+            else:
+                user_attendance["attendance"][week.week_number] = "absent"
+        response["users"].append(user_attendance)
+
+    return response
+
+
+
+################### STUDENT GRADES ####################
+class AddGradeRequest(BaseModel):
+    user_id: int
+    grade: float
+
+class EditGradeRequest(BaseModel):
+    user_id: int
+    grade: float
+    assignment_id: Optional[str] = None
+    date: Optional[datetime] = None
+
+@app.post("/api/server/{server_id}/admin/grade", response_model=List[dict])
+async def add_student_grade(server_id: int, grade_request: AddGradeRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to add grades for this student")
+
+    student_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == grade_request.user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+    if not student_member:
+        raise HTTPException(status_code=404, detail="Student not found in the server")
+
+    grades = {}
+    if student_member.grades:
+        try:
+            grades = json.loads(student_member.grades)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
+
+    grades[str(datetime.now())] = {
+        "assignment_id": None,
+        "room_id": None,
+        "grade": grade_request.grade,
+        "date": datetime.now().isoformat()
+    }
+    student_member.grades = json.dumps(grades)
+    db.commit()
+    db.refresh(student_member)
+
+    return [{"user_id": grade_request.user_id, "grade": grade_request.grade}]
+
+@app.put("/api/server/{server_id}/admin/grade", response_model=List[dict])
+async def update_student_grade(server_id: int, grade_request: EditGradeRequest, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to update grades for this student")
+
+    student_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == grade_request.user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+    if not student_member:
+        raise HTTPException(status_code=404, detail="Student not found in the server")
+
+    grades = {}
+    if student_member.grades:
+        try:
+            grades = json.loads(student_member.grades)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
+
+    if grade_request.date:
+        for key, value in grades.items():
+            if value.get("date") == grade_request.date.isoformat():
+                value["grade"] = grade_request.grade
+                break
+        else:
+            raise HTTPException(status_code=404, detail="Grade entry not found for the provided date")
+
+    elif grade_request.assignment_id:
+        collection_name = f"server_{server_id}_assignments_{grade_request.assignment_id}"
+        assignment = await mongo_db[collection_name].find_one({
+            "user_id": grade_request.user_id,
+            "grade": {"$exists": True}
+        })
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
+        await mongo_db[collection_name].update_one(
+            {"_id": ObjectId(grade_request.assignment_id)},
+            {"$set": {"grade": grade_request.grade}}
+        )
+
+    else:
+        raise HTTPException(status_code=400, detail="Either assignment_id or date must be provided to update the grade")
+
+    student_member.grades = json.dumps(grades)
+    db.commit()
+    db.refresh(student_member)
+
+    return [{"user_id": grade_request.user_id, "grade": grade_request.grade}]
+
+@app.get("/api/server/{server_id}/user/{user_id}/grades")
+async def get_student_grades(server_id: int, user_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to view grades for this student")
+
+    grades = []
+    for collection_name in mongo_db.list_collection_names():
+        if collection_name.startswith(f"server_{server_id}_assignments_"):
+            assignments = await mongo_db[collection_name].find({"user_id": user_id}).to_list(length=None)
+            for assignment in assignments:
+                grades.append({
+                    "assignment_id": str(assignment["_id"]),
+                    "room_id": int(collection_name.split("_")[-1]),
+                    "grade": assignment.get("grade", None),
+                    "date": None,
+                })
+
+    student_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user_id,
+        models.ServerMember.server_id == server_id
+    ).first()
+
+    if student_member and student_member.grades:
+        try:
+            grades_json = json.loads(student_member.grades)
+            for _, grade in grades_json.items():
+                grades.append({
+                    "assignment_id": None,
+                    "room_id": None,
+                    "grade": grade['grade'],
+                    "date": grade.get('date', None),
+                })
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
+
+    return grades
+
+@app.get("/api/server/{server_id}/grades")
+async def get_all_grades(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to view grades")
+
+    grouped_grades: Dict[int, str, List[dict]] = {}
+    members = db.query(models.ServerMember).filter(models.ServerMember.server_id == server_id).all()
+    for member in members:
+        grouped_grades[member.user_id] = {"name": None, "grades": []}
+        user = db.query(models.User).filter(models.User.id == member.user_id).first()
+        grouped_grades[member.user_id]["name"] = user.name
+        if member.grades:
+            try:
+                grades_json = json.loads(member.grades)
+                for _, grade in grades_json.items():
+                    grouped_grades[member.user_id]["grades"].append({
+                        "assignment_id": None,
+                        "room_id": None,
+                        "grade": grade.get("grade"),
+                        "date": grade.get("date")
+                    })
+            except json.JSONDecodeError:
+                continue
+
+    for collection_name in await mongo_db.list_collection_names():
+        if collection_name.startswith(f"server_{server_id}_assignments_"):
+            room_id = int(collection_name.split("_")[-1])
+            assignments = await mongo_db[collection_name].find({}).sort("grade", -1).to_list(length=None)
+            seen_users = set()
+            for assignment in assignments:
+                uid = assignment.get("user_id")
+                if uid not in seen_users:
+                    seen_users.add(uid)
+                    if uid not in grouped_grades:
+                        grouped_grades[uid] = {"name": None, "grades": []}
+                        user = db.query(models.User).filter(models.User.id == uid).first()
+                        grouped_grades[uid]["name"] = user.name if user else None
+                    grouped_grades[uid]["grades"].append({
+                        "assignment_id": str(assignment.get("_id")),
+                        "room_id": room_id,
+                        "grade": assignment.get("grade"),
+                        "date": None
+                    })
+
+    return [{"user_id": uid, "name": data["name"], "grades": data["grades"]} for uid, data in grouped_grades.items()]
+
+class BulkEditGrade(BaseModel):
+    user_id: int
+    grade: float
+    date: Optional[datetime] = None
+    assignment_id: Optional[str] = None
+    room_id: Optional[int] = None
+
+class BulkGradeUpdateRequest(BaseModel):
+    updates: List[BulkEditGrade]
+
+@app.put("/api/server/{server_id}/grades/bulk_edit")
+async def bulk_edit_grades(
+    server_id: int,
+    request: BulkGradeUpdateRequest,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server.owner_id == user.id and (not server_member or server_member.access_level <= 0):
+        raise HTTPException(status_code=403, detail="User is not authorized to update grades")
+
+    results = []
+
+    for update in request.updates:
+        student_member = db.query(models.ServerMember).filter_by(
+            user_id=update.user_id,
+            server_id=server_id
+        ).first()
+
+        if not student_member:
+            continue
+
+        if update.assignment_id and update.room_id is not None:
+            # MongoDB update
+            collection_name = f"server_{server_id}_assignments_{update.room_id}"
+            await mongo_db[collection_name].update_one(
+                {
+                    "user_id": update.user_id,
+                    "_id": ObjectId(update.assignment_id)
+                },
+                {"$set": {"grade": update.grade}},
+                upsert=True
+            )
+        elif update.date:
+            # SQL update (JSON field)
+            grades = {}
+            if student_member.grades:
+                try:
+                    grades = json.loads(student_member.grades)
+                except json.JSONDecodeError:
+                    continue
+
+            updated = False
+            for key, entry in grades.items():
+                if entry.get("date") == update.date.isoformat():
+                    entry["grade"] = update.grade
+                    updated = True
+                    break
+
+            if updated:
+                student_member.grades = json.dumps(grades)
+                db.add(student_member)
+        else:
+            continue  # Skip invalid updates
+
+        results.append({
+            "user_id": update.user_id,
+            "grade": update.grade,
+            "assignment_id": update.assignment_id,
+            "date": update.date
+        })
+
+    db.commit()
+    return results
 
 import uvicorn
 if __name__ == "__main__":
