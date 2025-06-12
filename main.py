@@ -2215,6 +2215,47 @@ async def bulk_edit_grades(
     db.commit()
     return results
 
+
+@app.get("/api/server/{server_id}/user/{user_id}/access_level")
+async def get_user_access_level(
+    server_id: int,
+    user_id: int,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user_id, 
+        models.ServerMember.server_id == server.id
+    ).first()
+
+    if not server_member and server.owner_id != user_id:
+        raise HTTPException(status_code=404, detail="User not found in the server")
+    
+
+    target_member = db.query(models.ServerMember).filter_by(
+        user_id=user_id,
+        server_id=server_id
+    ).first()
+
+    if server.owner_id == user_id:
+        return {"user_id": user_id, "access_level": 3}
+
+    if not target_member:
+        raise HTTPException(status_code=404, detail="User not found in the server")
+
+    return {"user_id": user_id, "access_level": target_member.access_level}
+
 import uvicorn
 if __name__ == "__main__":
     uvicorn.run(
