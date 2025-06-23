@@ -2215,6 +2215,97 @@ async def bulk_edit_grades(
     db.commit()
     return results
 
+@app.get("/api/server/{server_id}/overview")
+async def get_server_overview(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    if not server_member and server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    # Fetch all grades of current user (including from mongoDB)
+    grades = {}
+    if server_member.grades:
+        try:
+            grades = json.loads(server_member.grades)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=500, detail="Invalid grades format in server member data")
+    # add MongoDB grades
+    for collection_name in await mongo_db.list_collection_names():
+        if collection_name.startswith(f"server_{server_id}_assignments_"):
+            assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+            for assignment in assignments:
+                if "grade" in assignment:
+                    grades[str(assignment["_id"])] = {
+                        "assignment_id": str(assignment["_id"]),
+                        "room_id": int(collection_name.split("_")[-1]),
+                        "grade": assignment["grade"],
+                        "date": assignment.get("date", None)
+                    }
+
+    # Filter out grades with grade 0 or no grade
+    grades = {k: v for k, v in grades.items() if v.get("grade") not in [0, None]}
+    # If no grades found, return empty list
+    if not grades:
+        grades = []
+
+    # Fetch attendance
+    attendance = db.query(models.Attendance).filter_by(server_id=server_id, user_id=user.id).all()
+    attendance_summary = {}
+    for record in attendance:
+        week_number = record.week.week_number if record.week else 0
+        if week_number not in attendance_summary:
+            attendance_summary[week_number] = {"present": 0, "absent": 0, "excused": 0}
+        attendance_summary[week_number][record.status] += 1
+    
+    # Assignments summary
+    assignments_summary = {}
+    # Get all assignment rooms for this server from PostgreSQL
+    assignment_rooms = db.query(models.ServerRoom).filter(
+        models.ServerRoom.server_id == server_id,
+        models.ServerRoom.type.like("assignments%")
+    ).all()
+
+    for room in assignment_rooms:
+        # Extract due date from room type string: "assignment YYYY-MM-DD HH:MM"
+        try:
+            due_date_str = room.type.split(" ", 1)[1]
+            due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M")
+        except Exception:
+            due_date = None
+
+        collection_name = f"server_{server_id}_assignments_{room.id}"
+        assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+        for assignment in assignments:
+            if "grade" in assignment:
+                if room.id not in assignments_summary:
+                    assignments_summary[room.id] = []
+                assignments_summary[room.id].append({
+                    "assignment_id": str(assignment["_id"]),
+                    "grade": assignment["grade"],
+                    "date": assignment.get("date", None),
+                    "due_date": due_date
+                })
+        
+    # Prepare the overview response
+    overview = {
+        "server_name": server.name,
+        "grades": grades,
+        "attendance_summary": attendance_summary,
+        "assignments_summary": assignments_summary,
+    }
+
+    return overview
+
 
 @app.get("/api/server/{server_id}/user/{user_id}/access_level")
 async def get_user_access_level(
