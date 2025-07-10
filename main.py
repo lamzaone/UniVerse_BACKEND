@@ -32,12 +32,6 @@ def get_db():
     finally:
         db.close()
 
-def generate_token():
-    return secrets.token_urlsafe(32)
-
-def generate_refresh_token():
-    refresh_token = secrets.token_urlsafe(64)
-    return refresh_token
 
 db_dependency = Annotated[Session, Depends(get_db)]
 
@@ -2346,6 +2340,230 @@ async def get_user_access_level(
         raise HTTPException(status_code=404, detail="User not found in the server")
 
     return {"user_id": user_id, "access_level": target_member.access_level}
+
+
+
+# /server/${serverId}/user/${this.clickedUser.id}/access_level
+
+class UpdateAccessLevelRequest(BaseModel):
+    access_level: int
+
+@app.patch("/api/server/{server_id}/user/{user_id}/access_level")
+async def update_user_access_level(
+    server_id: int,
+    user_id: int,
+    request: UpdateAccessLevelRequest,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    if server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to update access level")
+
+    target_member = db.query(models.ServerMember).filter_by(
+        user_id=user_id,
+        server_id=server_id
+    ).first()
+
+    if not target_member:
+        raise HTTPException(status_code=404, detail="User not found in the server")
+
+    target_member.access_level = request.access_level  # Extract the integer value
+    db.commit()
+    
+    return {"user_id": user_id, "access_level": request.access_level}
+    
+
+@app.delete("/api/server/{server_id}/user/{user_id}")
+async def delete_user_from_server(
+    server_id: int,
+    user_id: int,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    
+    # check if current user is at least access_level 1
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server_id
+    ).first()
+
+    if not (server.owner_id == user.id or (server_member and server_member.access_level > 0)):
+        raise HTTPException(status_code=403, detail="Not authorized to remove users from the server")
+
+    target_member = db.query(models.ServerMember).filter_by(
+        user_id=user_id,
+        server_id=server_id
+    ).first()
+
+    if not target_member:
+        raise HTTPException(status_code=404, detail="User not found in the server")
+
+    db.delete(target_member)
+    db.commit()
+
+    return {"message": f"User {user_id} removed from server {server_id}"}
+
+
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ServerOverview(BaseModel):
+    server_id: int
+    server_name: str
+    access_level: int
+    grades: List[Dict]
+    attendance_summary: Dict[int, Dict[str, int]]
+    assignments_summary: Dict[int, List[Dict]]
+    professor_stats: Optional[Dict] = None
+
+@app.get("/api/user/servers-overview", response_model=List[ServerOverview])
+async def get_user_servers_overview(
+    db: Session = Depends(db_dependency),
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        logger.error("Missing or invalid Authorization header")
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        logger.error("Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Fetch all servers the user is a member of or owns
+    server_members = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id
+    ).all()
+    owned_servers = db.query(models.Server).filter(
+        models.Server.owner_id == user.id
+    ).all()
+
+    # Combine and deduplicate servers
+    server_ids = set([sm.server_id for sm in server_members] + [s.id for s in owned_servers])
+    servers = db.query(models.Server).filter(models.Server.id.in_(server_ids)).all()
+    
+    overview = []
+    for server in servers:
+        # Get user's access level
+        server_member = db.query(models.ServerMember).filter(
+            models.ServerMember.user_id == user.id,
+            models.ServerMember.server_id == server.id
+        ).first()
+        access_level = server_member.access_level if server_member else (3 if server.owner_id == user.id else 0)
+
+        # Fetch grades
+        grades = {}
+        if server_member and server_member.grades:
+            try:
+                grades = json.loads(server_member.grades)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid grades format for user_id={user.id}, server_id={server.id}")
+                grades = {}
+
+        # Add MongoDB grades
+        for collection_name in await mongo_db.list_collection_names():
+            if collection_name.startswith(f"server_{server.id}_assignments_"):
+                assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+                for assignment in assignments:
+                    if "grade" in assignment:
+                        grades[str(assignment["_id"])] = {
+                            "assignment_id": str(assignment["_id"]),
+                            "room_id": int(collection_name.split("_")[-1]),
+                            "grade": assignment["grade"],
+                            "date": assignment.get("date", None)
+                        }
+
+        # Filter out grades with grade 0 or None
+        grades = [v for k, v in grades.items() if v.get("grade") not in [0, None]]
+
+        # Fetch attendance
+        attendance = db.query(models.Attendance).filter_by(server_id=server.id, user_id=user.id).all()
+        attendance_summary = {}
+        for record in attendance:
+            week_number = record.week.week_number if record.week else 0
+            if week_number not in attendance_summary:
+                attendance_summary[week_number] = {"present": 0, "absent": 0, "excused": 0}
+            attendance_summary[week_number][record.status] += 1
+
+        # Assignments summary
+        assignments_summary = {}
+        assignment_rooms = db.query(models.ServerRoom).filter(
+            models.ServerRoom.server_id == server.id,
+            models.ServerRoom.type.like("assignments%")
+        ).all()
+
+        for room in assignment_rooms:
+            try:
+                due_date_str = room.type.split(" ", 1)[1]
+                due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M").isoformat()
+            except Exception:
+                due_date = None
+
+            collection_name = f"server_{server.id}_assignments_{room.id}"
+            assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+            for assignment in assignments:
+                if "grade" in assignment:
+                    if room.id not in assignments_summary:
+                        assignments_summary[room.id] = []
+                    assignments_summary[room.id].append({
+                        "assignment_id": str(assignment["_id"]),
+                        "grade": assignment["grade"],
+                        "date": assignment.get("date", None),
+                        "due_date": due_date
+                    })
+
+        # Professor stats (for access_level > 0)
+        professor_stats = None
+        if access_level > 0:
+            member_count = db.query(models.ServerMember).filter(
+                models.ServerMember.server_id == server.id
+            ).count()
+            ungraded_assignments = 0
+            for collection_name in await mongo_db.list_collection_names():
+                if collection_name.startswith(f"server_{server.id}_assignments_"):
+                    ungraded = await mongo_db[collection_name].find({"grade": None}).to_list(length=None)
+                    ungraded_assignments += len(ungraded)
+            professor_stats = {
+                "member_count": member_count,
+                "ungraded_assignments": ungraded_assignments
+            }
+
+        overview.append({
+            "server_id": server.id,
+            "server_name": server.name,
+            "access_level": access_level,
+            "grades": grades,
+            "attendance_summary": attendance_summary,
+            "assignments_summary": assignments_summary,
+            "professor_stats": professor_stats
+        })
+
+    logger.info(f"Returning overview for user_id={user.id}, servers={len(servers)}")
+    return overview
 
 import uvicorn
 if __name__ == "__main__":
