@@ -1,6 +1,7 @@
 import base64
 from urllib.parse import unquote
 import uuid
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -24,6 +25,8 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 CLIENT_ID = "167769953872-b5rnqtgjtuhvl09g45oid5r9r0lui2d6.apps.googleusercontent.com"
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def get_db():
     db = SessionLocal()
@@ -2270,25 +2273,42 @@ async def get_server_overview(server_id: int, db: db_dependency, Authorization: 
     ).all()
 
     for room in assignment_rooms:
-        # Extract due date from room type string: "assignment YYYY-MM-DD HH:MM"
-        try:
-            due_date_str = room.type.split(" ", 1)[1]
-            due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M")
-        except Exception:
-            due_date = None
+      # Extract due date from room type string: "assignment YYYY-MM-DD HH:MM"
+      try:
+        due_date_str = room.type.split(" ", 1)[1]
+        due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M")
+      except Exception:
+        due_date = None
 
-        collection_name = f"server_{server_id}_assignments_{room.id}"
-        assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+      # Only include assignments with due_date in the future (or no due_date)
+      if due_date is not None and due_date < datetime.now():
+        continue
+
+      collection_name = f"server_{server_id}_assignments_{room.id}"
+      assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+      # If user has assignments, add them as before
+      if assignments:
         for assignment in assignments:
-            if "grade" in assignment:
-                if room.id not in assignments_summary:
-                    assignments_summary[room.id] = []
-                assignments_summary[room.id].append({
-                    "assignment_id": str(assignment["_id"]),
-                    "grade": assignment["grade"],
-                    "date": assignment.get("date", None),
-                    "due_date": due_date
-                })
+          if "grade" in assignment:
+            if room.id not in assignments_summary:
+              assignments_summary[room.id] = []
+            assignments_summary[room.id].append({
+              "assignment_id": str(assignment["_id"]),
+              "grade": assignment["grade"],
+              "date": assignment.get("date", None),
+              "due_date": due_date
+            })
+      else:
+        # User did not submit any assignment for this room, add an empty entry
+        if room.id not in assignments_summary:
+          assignments_summary[room.id] = []
+        assignments_summary[room.id].append({
+          "assignment_id": None,
+          "grade": None,
+          "date": None,
+          "due_date": due_date
+        })
+
         
     # Prepare the overview response
     overview = {
@@ -2426,10 +2446,6 @@ async def delete_user_from_server(
 
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 class ServerOverview(BaseModel):
     server_id: int
     server_name: str
@@ -2439,11 +2455,13 @@ class ServerOverview(BaseModel):
     assignments_summary: Dict[int, List[Dict]]
     professor_stats: Optional[Dict] = None
 
-@app.get("/api/user/servers-overview", response_model=List[ServerOverview])
+@app.get("/api/user/overview/")
 async def get_user_servers_overview(
-    db: Session = Depends(db_dependency),
+    db: db_dependency,
     Authorization: Optional[str] = Header(None)
 ):
+    logger.info(f"Received GET request for /api/user/overview, Authorization: {Authorization}")
+    
     if not Authorization or not Authorization.startswith("Bearer "):
         logger.error("Missing or invalid Authorization header")
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -2451,7 +2469,7 @@ async def get_user_servers_overview(
     token = Authorization.replace("Bearer ", "")
     user = db.query(models.User).filter(models.User.token == token).first()
     if not user or user.token_expiry < datetime.now():
-        logger.error("Invalid or expired token")
+        logger.error(f"Invalid or expired token for user_id={user.id if user else 'unknown'}")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     # Fetch all servers the user is a member of or owns
@@ -2465,40 +2483,59 @@ async def get_user_servers_overview(
     # Combine and deduplicate servers
     server_ids = set([sm.server_id for sm in server_members] + [s.id for s in owned_servers])
     servers = db.query(models.Server).filter(models.Server.id.in_(server_ids)).all()
+    logger.info(f"Found {len(servers)} servers for user_id={user.id}: {server_ids}")
     
     overview = []
+    try:
+        tz = ZoneInfo("Europe/Bucharest")
+    except Exception:
+        tz = None
+    now = datetime.now(tz) if tz else datetime.now()  # EEST timezone fallback
     for server in servers:
+        logger.info(f"Processing server_id={server.id}, server_name={server.name}")
+        
         # Get user's access level
         server_member = db.query(models.ServerMember).filter(
             models.ServerMember.user_id == user.id,
             models.ServerMember.server_id == server.id
         ).first()
         access_level = server_member.access_level if server_member else (3 if server.owner_id == user.id else 0)
+        logger.info(f"User access_level={access_level} for server_id={server.id}")
 
         # Fetch grades
         grades = {}
         if server_member and server_member.grades:
             try:
                 grades = json.loads(server_member.grades)
-            except json.JSONDecodeError:
-                logger.error(f"Invalid grades format for user_id={user.id}, server_id={server.id}")
+                logger.info(f"Loaded grades from ServerMember for server_id={server.id}: {len(grades)} entries")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid grades format for user_id={user.id}, server_id={server.id}: {e}")
                 grades = {}
 
         # Add MongoDB grades
         for collection_name in await mongo_db.list_collection_names():
             if collection_name.startswith(f"server_{server.id}_assignments_"):
                 assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
+                logger.info(f"Found {len(assignments)} assignments in {collection_name}")
+                messages_collection = f"server_{server.id}_messages_{collection_name.split('_')[-1]}"
                 for assignment in assignments:
                     if "grade" in assignment:
+                      # Only add if user didn't send any messages in the collection
+                      message_count = 0
+                      if messages_collection in await mongo_db.list_collection_names():
+                        message_count = await mongo_db[messages_collection].count_documents({"user_id": user.id, "assignment_id": str(assignment["_id"])})
+                      if message_count == 0:
                         grades[str(assignment["_id"])] = {
                             "assignment_id": str(assignment["_id"]),
                             "room_id": int(collection_name.split("_")[-1]),
                             "grade": assignment["grade"],
                             "date": assignment.get("date", None)
                         }
+                        logger.info(f"Added grade for assignment_id={assignment['_id']} in server_id={server.id}")
 
         # Filter out grades with grade 0 or None
         grades = [v for k, v in grades.items() if v.get("grade") not in [0, None]]
+        logger.info(f"Filtered grades for server_id={server.id}: {len(grades)} valid grades")
 
         # Fetch attendance
         attendance = db.query(models.Attendance).filter_by(server_id=server.id, user_id=user.id).all()
@@ -2508,6 +2545,7 @@ async def get_user_servers_overview(
             if week_number not in attendance_summary:
                 attendance_summary[week_number] = {"present": 0, "absent": 0, "excused": 0}
             attendance_summary[week_number][record.status] += 1
+        logger.info(f"Attendance summary for server_id={server.id}: {len(attendance_summary)} weeks")
 
         # Assignments summary
         assignments_summary = {}
@@ -2515,26 +2553,43 @@ async def get_user_servers_overview(
             models.ServerRoom.server_id == server.id,
             models.ServerRoom.type.like("assignments%")
         ).all()
+        logger.info(f"Found {len(assignment_rooms)} assignment rooms for server_id={server.id}")
 
         for room in assignment_rooms:
             try:
                 due_date_str = room.type.split(" ", 1)[1]
-                due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M").isoformat()
-            except Exception:
+                try:
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+                    due_date_iso = due_date.isoformat()
+                except Exception as e:
+                    logger.error(f"Failed to set timezone for due_date in room_id={room.id}, server_id={server.id}: {e}")
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d %H:%M")
+                    due_date_iso = due_date.isoformat()
+            except Exception as e:
+                logger.error(f"Invalid due_date format for room_id={room.id}, server_id={server.id}: {e}")
                 due_date = None
+                due_date_iso = None
 
             collection_name = f"server_{server.id}_assignments_{room.id}"
             assignments = await mongo_db[collection_name].find({"user_id": user.id}).to_list(length=None)
-            for assignment in assignments:
-                if "grade" in assignment:
-                    if room.id not in assignments_summary:
-                        assignments_summary[room.id] = []
-                    assignments_summary[room.id].append({
-                        "assignment_id": str(assignment["_id"]),
-                        "grade": assignment["grade"],
-                        "date": assignment.get("date", None),
-                        "due_date": due_date
-                    })
+            logger.info(f"Found {len(assignments)} assignments in {collection_name}")
+            # If the user has not sent any assignments in this room, add the collection_name to assignments_summary with an empty list
+            if not assignments:
+              assignments_summary[room.id] = []
+              assignments_summary[room.id].append({
+                "assignment_name": str(room.name),
+                "server_id": server.id,
+                "assignment_id": room.id,
+                "grade": assignment["grade"],
+                "date": assignment.get("date", None),
+                "due_date": due_date_iso
+              })
+            else:
+              for assignment in assignments:
+                assignments_summary[room.id] = []
+
+
+        logger.info(f"Assignments summary for server_id={server.id}: {len(assignments_summary)} rooms with assignments")
 
         # Professor stats (for access_level > 0)
         professor_stats = None
@@ -2551,6 +2606,7 @@ async def get_user_servers_overview(
                 "member_count": member_count,
                 "ungraded_assignments": ungraded_assignments
             }
+            logger.info(f"Professor stats for server_id={server.id}: {professor_stats}")
 
         overview.append({
             "server_id": server.id,
@@ -2562,7 +2618,7 @@ async def get_user_servers_overview(
             "professor_stats": professor_stats
         })
 
-    logger.info(f"Returning overview for user_id={user.id}, servers={len(servers)}")
+    logger.info(f"Returning overview for user_id={user.id} with {len(overview)} servers")
     return overview
 
 import uvicorn
