@@ -2621,6 +2621,95 @@ async def get_user_servers_overview(
     logger.info(f"Returning overview for user_id={user.id} with {len(overview)} servers")
     return overview
 
+
+# delete message endpoint
+@app.delete("/api/server/{server_id}/room/{room_id}/message/{message_id}")
+async def delete_message(
+    server_id: int,
+    room_id: int,
+    message_id: str,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    # Allow: server owner, access_level > 0, or message author
+    collection_name = f"server_{server_id}_room_{room_id}"
+    if collection_name not in await mongo_db.list_collection_names():
+        raise HTTPException(status_code=404, detail="Room not found")
+    message = await mongo_db[collection_name].find_one({"_id": ObjectId(message_id)})
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    is_admin = server.owner_id == user.id or (server_member and server_member.access_level > 0)
+    is_author = message.get("user_id") == user.id
+    if not (is_admin or is_author):
+        raise HTTPException(status_code=403, detail="User is not authorized to delete this message")
+    result = await mongo_db[collection_name].delete_one({"_id": ObjectId(message_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found or you are not the author")
+    
+    await websocket_manager.broadcast_textroom(room_id, "message_deleted")
+
+    return {"message": "Message deleted successfully"}
+
+# delete assignment endpoint
+@app.delete("/api/server/{server_id}/assignment/{assignment_id}/message/{message_id}")
+async def delete_assignment_message(
+    server_id: int,
+    assignment_id: str,
+    message_id: str,
+    db: db_dependency,
+    Authorization: Optional[str] = Header(None)
+):
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    user = db.query(models.User).filter(models.User.token == token).first()
+    if not user or user.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    
+    collection_name = f"server_{server_id}_assignments_{assignment_id}"
+    if collection_name not in await mongo_db.list_collection_names():
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    message = await mongo_db[collection_name].find_one({"_id": ObjectId(message_id)})
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == user.id,
+        models.ServerMember.server_id == server.id
+    ).first()
+    
+    is_admin = server.owner_id == user.id or (server_member and server_member.access_level > 0)
+    is_author = message.get("user_id") == user.id
+    
+    if not (is_admin or is_author):
+        raise HTTPException(status_code=403, detail="User is not authorized to delete this message")
+    
+    result = await mongo_db[collection_name].delete_one({"_id": ObjectId(message_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found or you are not the author")
+    
+    await websocket_manager.broadcast_textroom(int(assignment_id), "message_deleted")
+    
+    return {"message": "Message deleted successfully"}
+
 import uvicorn
 if __name__ == "__main__":
     uvicorn.run(
