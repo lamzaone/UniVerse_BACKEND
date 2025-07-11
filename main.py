@@ -1567,6 +1567,42 @@ async def edit_attendance(server_id: int, attendance_edit: AttendanceEditRequest
     
 
 
+# delete last week endpoint
+@app.delete("/api/server/{server_id}/weeks/delete")
+async def delete_last_week(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
+    # Token validation
+    if not Authorization or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.replace("Bearer ", "")
+    admin = db.query(models.User).filter(models.User.token == token).first()
+    if not admin or admin.token_expiry < datetime.now():
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Authorization check
+    server = db.query(models.Server).filter(models.Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    server_member = db.query(models.ServerMember).filter(
+        models.ServerMember.user_id == admin.id,
+        models.ServerMember.server_id == server.id,
+        models.ServerMember.access_level > 0
+    ).first()
+    if not server_member and server.owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    # Fetch the last week
+    last_week = db.query(models.ServerWeek).filter_by(server_id=server_id).order_by(models.ServerWeek.week_number.desc()).first()
+    if not last_week:
+        raise HTTPException(status_code=404, detail="No weeks found for this server")
+    # Delete the last week
+    db.query(models.ServerWeek).filter_by(id=last_week.id).delete()
+    db.commit()
+    # Delete all attendance records for the last week
+    db.query(models.Attendance).filter_by(week_id=last_week.id).delete()
+    db.commit()
+    # Broadcast the week deletion
+    await websocket_manager.broadcast_server(server_id, "week_deleted")
+    return {"message": f"Week {last_week.week_number} deleted successfully."}
+
+
 @app.post("/api/server/{server_id}/weeks/create")
 async def create_week(server_id: int, db: db_dependency, Authorization: Optional[str] = Header(None)):
     # Token validation
