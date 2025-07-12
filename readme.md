@@ -20,7 +20,7 @@ pip install -r requirements.txt
    1. `sudo apt-get update`
    2. `sudo apt-get upgrade`
    3. `sudo apt install postgresql`
-   4. `sudo apt-get install libpq-dev`
+   4. `sudo apt install -y python3-dev libpq-dev gcc`
    <!-- 5. sudo apt install ufw
    sudo ufw allow 80/tcp
    sudo ufw allow 443/tcp

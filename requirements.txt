@@ -5,5 +5,7 @@ pymongo==4.8.0
 Requests==2.32.3
 SQLAlchemy==2.0.32
 uvicorn==0.30.6
+psycopg2-binary
 psycopg2
 uvicorn[standard]
+python-multipart
