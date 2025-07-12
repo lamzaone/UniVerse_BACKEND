@@ -46,7 +46,7 @@ curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
    7. `sudo systemctl start mongod`
    
 
-1. Run these commands in terminal to setup PostgresSQL
+2. Run these commands in terminal to setup PostgresSQL
  
 ```bash
 sudo service postgresql start
@@ -54,24 +54,23 @@ sudo service postgresql start
 
 ```bash
 sudo -i -u postgres
+psql
 ```
 
 ```bash
-ALTER USER postgres WITH PASSWORD 'pass'
+ALTER USER postgres WITH PASSWORD 'pass';
 CREATE DATABASE universe;
 GRANT ALL PRIVILEGES ON DATABASE universe TO postgres;
-ALTER ROLE ubuntu CREATEDB;
-ALTER ROLE ubuntu SUPERUSER;
+ALTER ROLE postgres CREATEDB;
+ALTER ROLE postgres SUPERUSER;
 ```
 
 ```bash
 \c universe
-GRANT ALL PRIVILEGES ON SCHEMA public TO ubuntu;
+GRANT ALL PRIVILEGES ON SCHEMA public TO postgres;
 ```
 
-3. replace uniVerse with universe in database.py postgresql url
-
-4. Install python3 and install all requirements in a virtual environment
+1. Install python3 and install all requirements in a virtual environment
 
 ```bash
 sudo chmod +777 /path/to/repo/
