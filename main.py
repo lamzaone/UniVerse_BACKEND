@@ -2636,8 +2636,25 @@ async def get_user_servers_overview(
             ungraded_assignments = 0
             for collection_name in await mongo_db.list_collection_names():
                 if collection_name.startswith(f"server_{server.id}_assignments_"):
-                    ungraded = await mongo_db[collection_name].find({"grade": None}).to_list(length=None)
-                    ungraded_assignments += len(ungraded)
+                    # Get all ungraded assignments
+                    ungraded = await mongo_db[collection_name].find({
+                        "$or": [{"grade": None}, {"grade": {"$exists": False}}]
+                    }).to_list(length=None)
+                    # Exclude professor messages (access_level > 0 or owner)
+                    filtered_ungraded = []
+                    for assignment in ungraded:
+                        uid = assignment.get("user_id")
+                        # Check if user is owner or has access_level > 0
+                        if uid == server.owner_id:
+                            continue
+                        member = db.query(models.ServerMember).filter(
+                            models.ServerMember.user_id == uid,
+                            models.ServerMember.server_id == server.id
+                        ).first()
+                        if member and member.access_level > 0:
+                            continue
+                        filtered_ungraded.append(assignment)
+                    ungraded_assignments += len(filtered_ungraded)
             professor_stats = {
                 "member_count": member_count,
                 "ungraded_assignments": ungraded_assignments
