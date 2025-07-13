@@ -84,8 +84,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-5. You can start the backend server by running the following command:
+---
+## Starting the backend
+
+You can start the backend server by running the following command:
 
 ```bash
-uvicorn main:app
+python3 main.py
 ```
