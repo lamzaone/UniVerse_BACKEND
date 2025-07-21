@@ -117,7 +117,6 @@ class MessageResponse(BaseModel):
 
 class MessagesRetrieve(BaseModel):
     room_id: int
-    user_token: str
 
 
 
@@ -148,4 +147,3 @@ class AssignmentResponse(BaseModel):
 
 class AssignmentsRetrieve(BaseModel):
     room_id: int
-    user_token: str

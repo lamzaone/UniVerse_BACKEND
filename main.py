@@ -4,11 +4,12 @@ import uuid
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, File, HTTPException, Depends, Body, Request, UploadFile, WebSocket, WebSocketDisconnect, Header
 from fastapi.staticfiles import StaticFiles
+import jwt as pyjwt  # Ensure PyJWT is installed: pip install PyJWT
 from pydantic import BaseModel, Field
 from typing import Annotated, List, Dict, Optional, Set
 from sqlalchemy.orm import Session
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import engine, SessionLocal
 import secrets
 import json
@@ -359,14 +360,29 @@ def save_image_to_filesystem(image_url: str, filename: str) -> str:
         logging.error(f"Failed to fetch image from URL: {image_url}")
         raise HTTPException(status_code=400, detail="Failed to retrieve user picture")
 
-def get_current_user( db: db_dependency, Authorization: str = Header(...)):
-    if not Authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
-    token = Authorization.replace("Bearer ", "")
-    user = db.query(models.User).filter(models.User.token == token).first()
-    if not user or user.token_expiry < datetime.now():
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return user
+def get_current_user(db: db_dependency, Authorization: str = Header(...)):
+    try:
+        if not Authorization:
+            logger.error("Authorization header missing")
+            raise HTTPException(status_code=401, detail="Authorization header missing")
+        if not Authorization.startswith("Bearer "):
+            logger.error("Invalid Authorization header format")
+            raise HTTPException(status_code=401, detail="Invalid Authorization header")
+        token = Authorization.replace("Bearer ", "")
+        if not token:
+            logger.error("Token is empty")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.query(models.User).filter(models.User.token == token).first()
+        if not user:
+            logger.error(f"No user found for token: {token}")
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if user.token_expiry < datetime.now(tz=timezone.utc):
+            logger.error(f"Token expired for user: {user.id}")
+            raise HTTPException(status_code=401, detail="Token expired")
+        return user
+    except Exception as e:
+        logger.error(f"Error in get_current_user: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Unauthorized: {str(e)}")
 
 # Get user profile picture from the filesystem
 @app.get("/api/images/{image_name}")
@@ -504,12 +520,18 @@ def validate_token(token_request: TokenRequest, db: db_dependency):
 
 
 
-@app.post("/api/users/info", response_model = List[User])
-async def get_users_info(user_ids: List[int], db: db_dependency): #needs a list of user ids, can be used for single ID as well
-    users = await db.query(User).filter(User.id.in_(user_ids)).all()
+@app.post("/api/users/info", response_model=List[User])
+async def get_users_info(request: Request, db: db_dependency):
+    """
+    Expects JSON body: { "userIds": [1, 2, 3] }
+    """
+    data = await request.json()
+    user_ids = data.get("userIds")
+    if not user_ids or not isinstance(user_ids, list):
+        raise HTTPException(status_code=400, detail="userIds must be a list of integers")
+    users = db.query(models.User).filter(models.User.id.in_(user_ids)).all()
     if not users:
         raise HTTPException(status_code=404, detail="Users not found")
-    
     users_response = []
     for user in users:
         user_response = User(
@@ -522,7 +544,6 @@ async def get_users_info(user_ids: List[int], db: db_dependency): #needs a list 
             refresh_token=user.refresh_token,
         )
         users_response.append(user_response)
-        
     return users_response
 
 
@@ -551,10 +572,10 @@ async def create_server(server: ServerCreate, db: db_dependency):
     db_server = models.Server(
         name=server.name,
         description=server.description,
-        owner_id=server.owner_id
+        owner_id=server.owner_id,
+        invite_code=secrets.token_urlsafe(4),
+        created_at=datetime.now()
     )
-    db_server.invite_code=secrets.token_urlsafe(4),
-    db_server.created_at=datetime.now()
 
 
     # Add the server to the database
@@ -746,6 +767,8 @@ async def join_server(server_info: JoinServer, db: db_dependency, Authorization:
         
         if is_member:
             raise HTTPException(status_code=400, detail="User is already a member of the server")
+            return
+            
         
         # Add the user as a new member to the server
         db_member = models.ServerMember(
@@ -880,7 +903,30 @@ async def check_access(access_info: AccessIn, db: db_dependency):
     else:
         raise HTTPException(status_code=404, detail="User not found in server")
 
+class AccessesIn(BaseModel):
+    token: str
+    server_id: int
 
+class AccessLevelOut(BaseModel):
+    user_id: int
+    access_level: int
+
+@app.post("/api/server/accesses", response_model=List[AccessLevelOut])
+async def get_all_access_levels(access_info: AccessesIn, db: db_dependency):
+    user = db.query(models.User).filter(models.User.token == access_info.token).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    server = db.query(models.Server).filter(models.Server.id == access_info.server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    
+    members = db.query(models.ServerMember).filter(models.ServerMember.server_id == access_info.server_id).all()
+    result = [AccessLevelOut(user_id=member.user_id, access_level=member.access_level if member.access_level else 0) for member in members]
+    # Add owner with access_level 3 if not already in members
+    if not any(m.user_id == server.owner_id for m in members):
+        result.append(AccessLevelOut(user_id=server.owner_id, access_level=3))
+    return result
 
 
 class RoomReorder(BaseModel):
@@ -2267,7 +2313,7 @@ async def get_server_overview(server_id: int, db: db_dependency, Authorization: 
         raise HTTPException(status_code=403, detail="Not authorized")
     # Fetch all grades of current user (including from mongoDB)
     grades = {}
-    if server_member.grades:
+    if server_member and server_member.grades:
         try:
             grades = json.loads(server_member.grades)
         except json.JSONDecodeError:
@@ -2763,7 +2809,54 @@ async def delete_assignment_message(
     
     return {"message": "Message deleted successfully"}
 
+
+# Testing endpoint to mock users
+class TestUserRequest(BaseModel):
+    email: str
+    name: str
+
+
+TEST_MODE = True  # Set to False in production
+
+@app.post("/api/auth/test-user", response_model=User)
+async def create_test_user(request: TestUserRequest, db: Session = Depends(get_db)):
+    if not TEST_MODE:
+        raise HTTPException(status_code=403, detail="Test endpoint disabled")
+    
+    user = db.query(models.User).filter(models.User.email == request.email).first()
+    if not user:
+        user = models.User(
+            email=request.email,
+            name=request.name,
+            nickname=request.name.split()[0] if " " in request.name else request.name,
+            picture="test_profile.png",
+            token=generate_token(),
+            refresh_token=generate_refresh_token(),
+            token_expiry=datetime.now() + timedelta(days=1),
+            refresh_token_expiry=datetime.now() + timedelta(days=7)
+        )
+        db.add(user)
+    else:
+        user.token = generate_token()
+        user.refresh_token = generate_refresh_token()
+        user.token_expiry = datetime.now() + timedelta(days=1)
+        user.refresh_token_expiry = datetime.now() + timedelta(days=7)
+    
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "nickname": user.nickname,
+        "picture": f"http://lamzaone.go.ro:8000/api/images/{user.picture}",
+        "token": user.token,
+        "refresh_token": user.refresh_token
+    }
+
 import uvicorn
+from fastapi import Request
 if __name__ == "__main__":
     uvicorn.run(
         "main:app", 

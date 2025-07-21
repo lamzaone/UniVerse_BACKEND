@@ -9,3 +9,4 @@ psycopg2-binary
 psycopg2
 uvicorn[standard]
 python-multipart
+locust
