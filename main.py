@@ -766,8 +766,7 @@ async def join_server(server_info: JoinServer, db: db_dependency, Authorization:
         ).first()
         
         if is_member:
-            raise HTTPException(status_code=400, detail="User is already a member of the server")
-            return
+            return db_server 
             
         
         # Add the user as a new member to the server
